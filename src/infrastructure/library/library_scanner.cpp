@@ -26,6 +26,10 @@ LibraryScanner::~LibraryScanner() {
 
 void LibraryScanner::start(const QStringList& roots, bool recursive) {
     cancel();
+    // Do not replace the watcher future while the previous worker still owns
+    // its cancellation token and result buffer. Cancellation is cooperative,
+    // so waiting here makes repeated starts deterministic and leak-free.
+    watcher_.waitForFinished();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     const auto token = cancelled_;
     watcher_.setFuture(QtConcurrent::run([roots, recursive, token] {
