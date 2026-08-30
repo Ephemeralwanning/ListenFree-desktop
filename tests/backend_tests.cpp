@@ -4,10 +4,14 @@
 #include "online/mock_online_provider.h"
 #include "qmlbridge/controllers.h"
 #include "sourcehost/source_protocol.h"
+#include "sourcehost/sourcehost_client.h"
 
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QtTest>
+
+#include <filesystem>
 
 class BackendTests final : public QObject {
     Q_OBJECT
@@ -17,6 +21,7 @@ private slots:
     void databaseMigrationAndRepository();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
+    void sourceHostProcessLifecycle();
     void mockProvider();
     void listModels();
     void appControllerMock();
@@ -85,6 +90,18 @@ void BackendTests::sourceProtocolRejectsInvalidFrame() {
     QString error;
     QVERIFY(!listenfree::sourcehost::SourceProtocol::decode(QByteArray("bad"), output, &error));
     QCOMPARE(error, QStringLiteral("frame-too-short"));
+}
+
+void BackendTests::sourceHostProcessLifecycle() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    QVERIFY(QFileInfo::exists(executable));
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QVERIFY(client.start());
+    QVERIFY(client.running());
+    QVERIFY(client.loadPlugin(std::filesystem::path("mock-source.js")));
+    client.cancel("request-1");
+    client.stop();
+    QVERIFY(!client.running());
 }
 
 void BackendTests::mockProvider() {

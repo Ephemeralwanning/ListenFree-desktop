@@ -59,6 +59,13 @@ target_include_directories(listenfree_source_protocol PUBLIC ${CMAKE_CURRENT_SOU
 add_executable(listenfree-sourcehost src/sourcehost/sourcehost_main.cpp)
 target_link_libraries(listenfree-sourcehost PRIVATE listenfree_source_protocol Qt6::Core)
 
+add_library(listenfree_source_client STATIC
+    src/sourcehost/sourcehost_client.h
+    src/sourcehost/sourcehost_client.cpp
+)
+target_link_libraries(listenfree_source_client PUBLIC listenfree_domain Qt6::Core)
+target_include_directories(listenfree_source_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 add_library(listenfree_online STATIC
     src/online/mock_online_provider.h
     src/online/mock_online_provider.cpp
@@ -86,7 +93,7 @@ target_link_libraries(listenfree PRIVATE listenfree_qmlbridge Qt6::Gui Qt6::Quic
 if(LISTENFREE_BUILD_TESTS)
     enable_testing()
     add_executable(listenfree_tests tests/backend_tests.cpp)
-    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol Qt6::Test Qt6::Sql)
+    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client Qt6::Test Qt6::Sql)
     target_include_directories(listenfree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME listenfree_tests COMMAND listenfree_tests -platform offscreen)
 endif()
