@@ -31,6 +31,7 @@ private slots:
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
+    void sourceHostRequestTimeout();
     void mockProvider();
     void listModels();
     void appControllerMock();
@@ -197,6 +198,21 @@ void BackendTests::sourceHostProcessLifecycle() {
     client.cancel("request-1");
     client.stop();
     QVERIFY(!client.running());
+}
+
+void BackendTests::sourceHostRequestTimeout() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QVERIFY(client.start());
+    QSignalSpy timeoutSpy(&client, &listenfree::sourcehost::SourceHostClient::requestTimedOut);
+    listenfree::sourcehost::SourceMessage request;
+    request.type = listenfree::sourcehost::MessageType::Search;
+    request.requestId = QStringLiteral("timeout-1");
+    request.payload.insert(QStringLiteral("query"), QStringLiteral("never-replied"));
+    QVERIFY(client.request(request, 50));
+    QTRY_COMPARE_WITH_TIMEOUT(timeoutSpy.count(), 1, 1000);
+    QCOMPARE(timeoutSpy.takeFirst().at(0).toString(), QStringLiteral("timeout-1"));
+    client.stop();
 }
 
 void BackendTests::mockProvider() {

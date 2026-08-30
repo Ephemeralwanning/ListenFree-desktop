@@ -1,6 +1,10 @@
 #include "sourcehost/sourcehost_client.h"
 
-#include <QTextStream>
+#include <QDataStream>
+#include <QIODevice>
+#include <QTimer>
+
+#include <utility>
 
 namespace listenfree::sourcehost {
 
@@ -9,8 +13,22 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
     connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
         emit protocolError(process_.errorString());
     });
+    connect(&process_, &QProcess::readyRead, this, [this] {
+        if (handshakeComplete_) processFrames();
+    });
     connect(&process_, &QProcess::finished, this, [this](int, QProcess::ExitStatus status) {
-        if (status == QProcess::CrashExit) emit crashed();
+        clearPending();
+        if (status == QProcess::CrashExit) {
+            emit crashed();
+            if (autoRestart_ && !stopping_ && restartAttempts_ == 0) {
+                ++restartAttempts_;
+                QTimer::singleShot(0, this, [this] {
+                    if (start()) emit restarted();
+                });
+            }
+        } else {
+            restartAttempts_ = 0;
+        }
     });
 }
 
@@ -18,6 +36,8 @@ SourceHostClient::~SourceHostClient() { stop(); }
 
 bool SourceHostClient::start() {
     if (running() || executablePath_.isEmpty()) return false;
+    stopping_ = false;
+    handshakeComplete_ = false;
     process_.start(executablePath_);
     if (!process_.waitForStarted(1000) || !process_.waitForReadyRead(1000)) return false;
     const QByteArray greeting = process_.readLine().trimmed();
@@ -26,18 +46,41 @@ bool SourceHostClient::start() {
         stop();
         return false;
     }
+    handshakeComplete_ = true;
     emit ready();
     return true;
 }
 
 void SourceHostClient::stop() noexcept {
     if (!running()) return;
+    stopping_ = true;
+    handshakeComplete_ = false;
+    clearPending();
     process_.write("shutdown\n");
     process_.waitForBytesWritten(200);
     if (!process_.waitForFinished(1000)) {
         process_.kill();
         process_.waitForFinished(1000);
     }
+    stopping_ = false;
+    restartAttempts_ = 0;
+}
+
+bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
+    if (!running() || message.requestId.isEmpty() || timeoutMs <= 0) return false;
+    if (const auto previous = pending_.take(message.requestId); previous) previous->deleteLater();
+    const QByteArray frame = SourceProtocol::encode(message);
+    if (process_.write(frame) != frame.size() || !process_.waitForBytesWritten(200)) return false;
+    auto* timer = new QTimer(this);
+    timer->setSingleShot(true);
+    const QString requestId = message.requestId;
+    connect(timer, &QTimer::timeout, this, [this, requestId] {
+        pending_.remove(requestId);
+        emit requestTimedOut(requestId);
+    });
+    pending_.insert(requestId, timer);
+    timer->start(timeoutMs);
+    return true;
 }
 
 bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
@@ -50,10 +93,47 @@ bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
 
 void SourceHostClient::cancel(const std::string& requestId) {
     if (!running()) return;
+    const QString id = QString::fromStdString(requestId);
+    if (const auto timer = pending_.take(id); timer) timer->deleteLater();
     process_.write("cancel:");
     process_.write(QString::fromStdString(requestId).toUtf8());
     process_.write("\n");
     process_.waitForBytesWritten(200);
+}
+
+void SourceHostClient::clearPending() {
+    for (const auto& timer : pending_) {
+        if (timer) timer->stop();
+        if (timer) timer->deleteLater();
+    }
+    pending_.clear();
+}
+
+void SourceHostClient::processFrames() {
+    readBuffer_.append(process_.readAll());
+    while (readBuffer_.size() >= 4) {
+        QDataStream header(readBuffer_.left(4));
+        header.setByteOrder(QDataStream::BigEndian);
+        quint32 size = 0;
+        header >> size;
+        if (size == 0 || size > 1024U * 1024U) {
+            emit protocolError(QStringLiteral("invalid-frame-size"));
+            readBuffer_.clear();
+            return;
+        }
+        const qsizetype frameSize = static_cast<qsizetype>(size) + 4;
+        if (readBuffer_.size() < frameSize) return;
+        const QByteArray frame = readBuffer_.left(frameSize);
+        readBuffer_.remove(0, frameSize);
+        SourceMessage message;
+        QString error;
+        if (!SourceProtocol::decode(frame, message, &error)) {
+            emit protocolError(error);
+            continue;
+        }
+        if (const auto timer = pending_.take(message.requestId); timer) timer->deleteLater();
+        emit messageReceived(message);
+    }
 }
 
 } // namespace listenfree::sourcehost
