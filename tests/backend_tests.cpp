@@ -1,5 +1,6 @@
 #include "domain/domain.h"
 #include "infrastructure/database/database.h"
+#include "infrastructure/database/repositories.h"
 #include "media/playback_state_machine.h"
 #include "online/mock_online_provider.h"
 #include "qmlbridge/controllers.h"
@@ -11,6 +12,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <array>
 #include <filesystem>
 
 class BackendTests final : public QObject {
@@ -19,6 +21,7 @@ private slots:
     void queueOperations();
     void playbackStateTransitions();
     void databaseMigrationAndRepository();
+    void databasePortRepositories();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
@@ -68,6 +71,29 @@ void BackendTests::databaseMigrationAndRepository() {
     QCOMPARE(QString::fromStdString(tracks.front().title), QStringLiteral("Database Track"));
     database.close();
     QVERIFY(!database.isOpen());
+}
+
+void BackendTests::databasePortRepositories() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(temp.filePath(QStringLiteral("ports.sqlite"))));
+    listenfree::infrastructure::database::TrackRepository tracks(database);
+    listenfree::infrastructure::database::SettingsRepository settings(database);
+
+    listenfree::domain::Track first;
+    first.id = listenfree::domain::TrackId("repo-1");
+    first.title = "Repository Song";
+    listenfree::domain::Track second;
+    second.id = listenfree::domain::TrackId("repo-2");
+    second.title = "Another Song";
+    const std::array batch{first, second};
+    QVERIFY(tracks.upsert(batch));
+    QVERIFY(tracks.find(first.id).has_value());
+    QCOMPARE(tracks.search("Repository").size(), std::size_t(1));
+    QVERIFY(settings.set("volume", "0.75"));
+    QCOMPARE(settings.get("volume").value_or(""), std::string("0.75"));
+    QVERIFY(!settings.get("missing").has_value());
 }
 
 void BackendTests::sourceProtocolRoundTrip() {

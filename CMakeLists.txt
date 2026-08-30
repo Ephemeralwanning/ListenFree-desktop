@@ -29,6 +29,8 @@ target_include_directories(listenfree_application PUBLIC ${CMAKE_CURRENT_SOURCE_
 add_library(listenfree_database STATIC
     src/infrastructure/database/database.h
     src/infrastructure/database/database.cpp
+    src/infrastructure/database/repositories.h
+    src/infrastructure/database/repositories.cpp
 )
 target_link_libraries(listenfree_database PUBLIC listenfree_domain Qt6::Core Qt6::Sql)
 target_include_directories(listenfree_database PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

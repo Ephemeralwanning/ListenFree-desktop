@@ -91,4 +91,57 @@ std::vector<domain::Track> Database::loadTracks() const {
     return result;
 }
 
+std::optional<domain::Track> Database::findTrack(const domain::TrackId& id) const {
+    if (!isOpen() || id.empty()) return std::nullopt;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("SELECT track_id,title,duration_ms,local_path,remote_url FROM tracks WHERE track_id = ?"));
+    query.addBindValue(QString::fromStdString(id.value()));
+    if (!query.exec() || !query.next()) return std::nullopt;
+    domain::Track track;
+    track.id = domain::TrackId(query.value(0).toString().toStdString());
+    track.title = query.value(1).toString().toStdString();
+    track.duration = std::chrono::milliseconds(query.value(2).toLongLong());
+    if (!query.value(3).isNull()) track.localPath = query.value(3).toString().toStdString();
+    if (!query.value(4).isNull()) track.remoteUrl = query.value(4).toString().toStdString();
+    return track;
+}
+
+std::vector<domain::Track> Database::searchTracks(const QString& queryText) const {
+    std::vector<domain::Track> result;
+    if (!isOpen()) return result;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("SELECT track_id,title,duration_ms,local_path,remote_url FROM tracks WHERE title LIKE ? ORDER BY title"));
+    query.addBindValue(QStringLiteral("%").append(queryText).append(QStringLiteral("%")));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        domain::Track track;
+        track.id = domain::TrackId(query.value(0).toString().toStdString());
+        track.title = query.value(1).toString().toStdString();
+        track.duration = std::chrono::milliseconds(query.value(2).toLongLong());
+        if (!query.value(3).isNull()) track.localPath = query.value(3).toString().toStdString();
+        if (!query.value(4).isNull()) track.remoteUrl = query.value(4).toString().toStdString();
+        result.push_back(std::move(track));
+    }
+    return result;
+}
+
+std::optional<std::string> Database::getSetting(const QString& key) const {
+    if (!isOpen() || key.isEmpty()) return std::nullopt;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("SELECT value FROM settings WHERE key = ?"));
+    query.addBindValue(key);
+    if (!query.exec() || !query.next()) return std::nullopt;
+    return query.value(0).toString().toStdString();
+}
+
+bool Database::setSetting(const QString& key, const QString& value, const QString& valueType) {
+    if (!isOpen() || key.isEmpty() || valueType.isEmpty()) return false;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("INSERT INTO settings(key,value,value_type) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_type=excluded.value_type"));
+    query.addBindValue(key);
+    query.addBindValue(value);
+    query.addBindValue(valueType);
+    return query.exec();
+}
+
 } // namespace listenfree::infrastructure::database
