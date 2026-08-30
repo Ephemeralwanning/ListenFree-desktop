@@ -22,7 +22,7 @@
 | D-014 | 常见本地音频格式按测试矩阵验收 | 2026-08-30 | 至少覆盖 MP3、FLAC、M4A、AAC、OGG/OGA、Opus、WAV、APE、WV、AIFF/AIF、TTA、WMA；MP4 音频容器列入兼容验证。扩展名可见不等于解码、Seek、元数据和歌词全链路通过。 |
 | D-015 | UI 采用 Apple 风格方向，最终以 Figma 确认 | 2026-08-30 | 当前只确定方向，不凭口头描述提前锁定组件尺寸、动效和视觉令牌。 |
 | D-016 | 正常使用内存目标低于 400 MiB | 2026-08-30 | 在 Windows 11、i9-13980 + RTX 4060 笔记本测量整个进程树；具体基准场景与峰值/稳态口径仍需补齐。 |
-| D-017 | 使用 GitHub Releases 发布，暂不做自动更新 | 2026-08-30 | 首发工件至少应包含安装版；便携 ZIP 为推荐的诊断与备用工件，待用户确认。 |
+| D-017 | GitHub Releases 只发布 Windows x64 Setup EXE | 2026-08-30 | 首版不提供便携 ZIP，不做应用内自动更新；安装器采用 CPack + Inno Setup，最终工件由 `windeployqt` 部署目录生成。 |
 | D-018 | 旧 JS 音源生态兼容优先于重新设计插件 API | 2026-08-30 | 参考旧版正常行为，同时增加进程隔离、超时、取消、输入输出验证和可恢复崩溃，不要求复刻其内部 Chromium 实现。 |
 | D-019 | 在线服务不迁移旧内部实现，以性能、效果和可靠性选型 | 2026-08-30 | 排行榜、搜索和歌单统一进入可替换的 `IOnlineProvider`；网易云优先验证 C++/Qt 原生实现，旧 Node API 只作正确性基准和必要回退。 |
 
@@ -36,7 +36,6 @@
 | C-005 | 后续增加 QuickJS 运行时并保留 Node 回退 | 验证 Windows/MSVC 支持和全部 `globalThis.lx` API。 |
 | C-006 | 网易云优先采用 C++/Qt 原生适配器 | 比较 Qcm/ncrequest、QCloudMusicApi、当前 Node API 与独立 ncm-api-rs 的 Windows 可用性、账号功能、内存、延迟和维护成本；Rust 方案只允许作为窄服务候选。 |
 | C-007 | Apple Music 风格歌词原生 QML/QSG 重建 | 建立 60 FPS 原型并测试逐字高亮、模糊、弹簧、流体背景和显存。 |
-| C-009 | CPack + Inno Setup 生成安装 EXE，同时生成便携 ZIP | 用干净 Windows 11/10 环境验证安装、覆盖升级、卸载、快捷方式、文件关联、非管理员安装、便携数据目录和 GitHub Release 上传。 |
 
 ## 已否决
 
@@ -45,3 +44,4 @@
 | R-001 | 主界面继续使用 Electron/Chromium | 与降低基础内存和进程开销的目标冲突。 |
 | R-002 | 用 QWebEngine 单独承载 AMLL 作为最终方案 | 为单一视图重新引入 Chromium，除非 PoC 证明原生实现不可接受，否则不采用。 |
 | R-003 | Rust-first + Qt Bridges for Rust 作为主后端 | 当前项目没有足以抵消 Beta 桥接、双工具链和跨语言调试成本的明确收益。 |
+| R-004 | 首版同时发布便携 ZIP | 用户确认只需要 Setup 安装版 EXE，减少打包与数据目录测试分支。 |

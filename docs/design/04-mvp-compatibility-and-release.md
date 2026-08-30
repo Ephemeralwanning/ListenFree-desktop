@@ -104,20 +104,19 @@ MP3、FLAC、M4A/AAC、OGG/Opus、WAV 是首批门禁；APE、WV、AIFF/AIF、TT
 
 | 方案 | 适用情况 | 本项目判断 |
 |---|---|---|
-| CPack + Inno Setup EXE | 单体 Windows 桌面应用、安装目录、快捷方式、卸载、文件关联 | 推荐。CMake 3.27+ 原生有 Inno Setup 生成器，配置与主构建统一。 |
+| CPack + Inno Setup EXE | 单体 Windows 桌面应用、安装目录、快捷方式、卸载、文件关联 | **已选用**。CMake 3.27+ 原生有 Inno Setup 生成器，配置与主构建统一。 |
 | CPack + NSIS EXE | 与旧项目安装体验接近、脚本生态成熟 | 可行备选；旧项目当前就是 NSIS。 |
 | Qt Installer Framework | 多组件、在线仓库、维护工具和组件更新 | 当前不做自动更新，功能偏重；以后需要组件化更新时再考虑。 |
 | WiX/MSI | 企业集中部署、组策略和标准 MSI 工作流 | 首版成本过高，企业需求出现后再增加。 |
 | MSIX | Windows 现代包管理或商店分发 | 通常涉及签名和容器规则，当前 GitHub Release 首发不优先。 |
-| 便携 ZIP | 解压即用、测试、诊断和无安装使用 | 建议与安装 EXE 同时发布，但必须明确便携数据目录，避免污染安装版配置。 |
+| 便携 ZIP | 解压即用、测试、诊断和无安装使用 | 首版不发布。 |
 
-### 推荐产物
+### 已确认产物
 
-GitHub Release 暂建议提供：
+GitHub Release 首版只提供：
 
 - `ListenFree-vX.Y.Z-win-x64-Setup.exe`；
-- `ListenFree-vX.Y.Z-win-x64-portable.zip`；
-- `SHA256SUMS.txt`；
-- 后续条件成熟时再加代码签名、自动更新和其他架构。
+- Release 页面记录该文件的 SHA-256；
+- 后续条件成熟时再考虑代码签名、自动更新和其他架构。
 
-该安装方案仍为候选，需用户确认后才能升级为正式决策。
+安装测试必须覆盖干净 Windows 11/10、覆盖安装、卸载、开始菜单快捷方式、安装目录选择、非管理员/管理员边界，以及安装失败后的清理行为。
