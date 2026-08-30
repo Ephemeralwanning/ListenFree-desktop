@@ -81,6 +81,7 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(temp.isValid());
     listenfree::infrastructure::database::Database database;
     QVERIFY(database.open(temp.filePath(QStringLiteral("ports.sqlite"))));
+    QVERIFY(database.migrate());
     listenfree::infrastructure::database::TrackRepository tracks(database);
     listenfree::infrastructure::database::SettingsRepository settings(database);
     listenfree::infrastructure::database::PlaylistRepository playlists(database);
@@ -108,6 +109,13 @@ void BackendTests::databasePortRepositories() {
     QCOMPARE(stored.size(), std::size_t(1));
     QCOMPARE(stored.front().entries.size(), std::size_t(1));
     QVERIFY(playlists.remove(playlist.id));
+    QVERIFY(playlists.list().empty());
+
+    listenfree::domain::Playlist invalid;
+    invalid.id = listenfree::domain::PlaylistId("playlist-invalid");
+    invalid.title = "Should Roll Back";
+    invalid.entries.push_back({"entry-invalid", listenfree::domain::TrackId("missing-track"), 0});
+    QVERIFY(!playlists.save(invalid));
     QVERIFY(playlists.list().empty());
 }
 
