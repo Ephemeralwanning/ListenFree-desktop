@@ -3,6 +3,7 @@
 #include "infrastructure/database/repositories.h"
 #include "infrastructure/library/library_scanner.h"
 #include "media/playback_state_machine.h"
+#include "media/qt_audio_player.h"
 #include "online/mock_online_provider.h"
 #include "qmlbridge/controllers.h"
 #include "sourcehost/source_protocol.h"
@@ -22,6 +23,7 @@ class BackendTests final : public QObject {
 private slots:
     void queueOperations();
     void playbackStateTransitions();
+    void audioPlayerDomainAdapter();
     void databaseMigrationAndRepository();
     void databasePortRepositories();
     void libraryScannerAdapter();
@@ -56,6 +58,15 @@ void BackendTests::playbackStateTransitions() {
     QVERIFY(machine.transition(listenfree::domain::PlaybackState::Paused));
     QVERIFY(!machine.transition(listenfree::domain::PlaybackState::Buffering));
     QVERIFY(machine.transition(listenfree::domain::PlaybackState::Stopped));
+}
+
+void BackendTests::audioPlayerDomainAdapter() {
+    listenfree::media::QtAudioPlayer player;
+    listenfree::domain::PlaybackItem item;
+    item.track.id = listenfree::domain::TrackId("no-source");
+    item.track.title = "Missing source";
+    player.open(item);
+    QCOMPARE(player.state(), listenfree::domain::PlaybackState::Error);
 }
 
 void BackendTests::databaseMigrationAndRepository() {

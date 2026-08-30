@@ -1,5 +1,7 @@
 #include "media/qt_audio_player.h"
 
+#include <QUrl>
+
 #include <algorithm>
 
 namespace listenfree::media {
@@ -37,6 +39,20 @@ QString QtAudioPlayer::stateName() const {
     return QStringLiteral("Error");
 }
 
+void QtAudioPlayer::open(const domain::PlaybackItem& item) {
+    if (item.resolvedUrl) {
+        open(QUrl(QString::fromStdString(*item.resolvedUrl)));
+    } else if (item.track.localPath) {
+        open(QUrl::fromLocalFile(QString::fromStdString(*item.track.localPath)));
+    } else if (item.track.remoteUrl) {
+        open(QUrl(QString::fromStdString(*item.track.remoteUrl)));
+    } else {
+        state_ = domain::PlaybackState::Error;
+        emit stateChanged();
+        emit errorChanged(QStringLiteral("playback-item-has-no-source"));
+    }
+}
+
 void QtAudioPlayer::open(const QUrl& url) {
     state_ = domain::PlaybackState::Loading;
     emit stateChanged();
@@ -47,6 +63,7 @@ void QtAudioPlayer::play() { player_.play(); }
 void QtAudioPlayer::pause() { player_.pause(); }
 void QtAudioPlayer::stop() { player_.stop(); }
 void QtAudioPlayer::seek(qint64 position) { player_.setPosition(position); }
+void QtAudioPlayer::seek(std::chrono::milliseconds position) { seek(position.count()); }
 void QtAudioPlayer::setVolume(float volume) { output_.setVolume(std::clamp(volume, 0.0F, 1.0F)); }
 
 } // namespace listenfree::media
