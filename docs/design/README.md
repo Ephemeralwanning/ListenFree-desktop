@@ -19,7 +19,7 @@
 5. `04-mvp-compatibility-and-release.md`：MVP、格式、旧音源契约、在线服务、性能和发布候选。
 6. `05-backend-bootstrap-architecture.md`：Backend Bootstrap 的功能区、依赖方向、核心接口与进程边界。
 7. `90-codex-execution-guide.md`：AI 自动化实施纪律。
-8. `99-master-plan.md`：汇总实施总纲；当前等待用户批准。
+8. `99-master-plan.md`：汇总实施总纲；当前已批准，可按阶段执行。
 
 ## 文档状态规范
 
