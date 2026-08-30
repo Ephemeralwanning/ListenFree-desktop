@@ -17,3 +17,10 @@ This log records reversible backend choices made without blocking design work. C
 - **Reason:** This is deterministic, reversible, avoids conflicts with other Qt installations, and does not change machine-wide policy.
 - **Alternatives:** User-level PATH changes; Qt Creator-only kit configuration; system-level PATH changes.
 - **Review later:** No, unless CI requires a different entry point.
+
+## BID-003 — Defer Qt 6.11.2 until the installer feed is reproducible
+
+- **Question:** Should the bootstrap immediately move beyond the requested Qt 6.10 line?
+- **Choice:** Keep the verified development kit at Qt 6.10.3 for this milestone; revisit Qt 6.11.2 after a reproducible package feed or official installer is available.
+- **Reason:** Qt 6.11.2 is a newer stable patch release, but the current `aqtinstall` metadata request fails while resolving `Updates.xml`. Switching kits mid-bootstrap would make the build less reproducible than the already-validated Qt 6.10.3 environment.
+- **Review later:** Before release-candidate MSVC validation; the CMake requirement and module boundaries permit a minor-version upgrade without redesign.
