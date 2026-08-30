@@ -17,9 +17,9 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
     connect(&process_, &QProcess::readyRead, this, [this] {
         if (handshakeComplete_) processFrames();
     });
-    connect(&process_, &QProcess::finished, this, [this](int, QProcess::ExitStatus status) {
+    connect(&process_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
         clearPending();
-        if (status == QProcess::CrashExit) {
+        if (status == QProcess::CrashExit || exitCode != 0) {
             emit crashed();
             if (autoRestart_ && !stopping_ && restartAttempts_ == 0) {
                 ++restartAttempts_;

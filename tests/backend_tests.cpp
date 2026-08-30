@@ -32,6 +32,7 @@ private slots:
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
     void sourceHostRequestTimeout();
+    void sourceHostCrashRecovery();
     void mockProvider();
     void listModels();
     void appControllerMock();
@@ -213,6 +214,23 @@ void BackendTests::sourceHostRequestTimeout() {
     QVERIFY(client.request(request, 50));
     QTRY_COMPARE_WITH_TIMEOUT(timeoutSpy.count(), 1, 1000);
     QCOMPARE(timeoutSpy.takeFirst().at(0).toString(), QStringLiteral("timeout-1"));
+    client.stop();
+}
+
+void BackendTests::sourceHostCrashRecovery() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy crashedSpy(&client, &listenfree::sourcehost::SourceHostClient::crashed);
+    QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
+    QVERIFY(client.start());
+    listenfree::sourcehost::SourceMessage request;
+    request.type = listenfree::sourcehost::MessageType::Log;
+    request.requestId = QStringLiteral("crash-1");
+    request.payload.insert(QStringLiteral("crash"), true);
+    QVERIFY(client.request(request, 1000));
+    QTRY_COMPARE_WITH_TIMEOUT(crashedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(restartedSpy.count(), 1, 3000);
+    QVERIFY(client.running());
     client.stop();
 }
 
