@@ -28,4 +28,16 @@ private:
     Database& database_;
 };
 
+class PlaylistRepository final : public application::IPlaylistRepository {
+public:
+    explicit PlaylistRepository(Database& database) noexcept : database_(database) {}
+
+    std::vector<domain::Playlist> list() override;
+    bool save(const domain::Playlist& playlist) override;
+    bool remove(const domain::PlaylistId& id) override;
+
+private:
+    Database& database_;
+};
+
 } // namespace listenfree::infrastructure::database

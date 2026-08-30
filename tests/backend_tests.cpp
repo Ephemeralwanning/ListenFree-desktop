@@ -83,6 +83,7 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(database.open(temp.filePath(QStringLiteral("ports.sqlite"))));
     listenfree::infrastructure::database::TrackRepository tracks(database);
     listenfree::infrastructure::database::SettingsRepository settings(database);
+    listenfree::infrastructure::database::PlaylistRepository playlists(database);
 
     listenfree::domain::Track first;
     first.id = listenfree::domain::TrackId("repo-1");
@@ -97,6 +98,17 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(settings.set("volume", "0.75"));
     QCOMPARE(settings.get("volume").value_or(""), std::string("0.75"));
     QVERIFY(!settings.get("missing").has_value());
+
+    listenfree::domain::Playlist playlist;
+    playlist.id = listenfree::domain::PlaylistId("playlist-1");
+    playlist.title = "Favorites";
+    playlist.entries.push_back({"entry-1", first.id, 0});
+    QVERIFY(playlists.save(playlist));
+    const auto stored = playlists.list();
+    QCOMPARE(stored.size(), std::size_t(1));
+    QCOMPARE(stored.front().entries.size(), std::size_t(1));
+    QVERIFY(playlists.remove(playlist.id));
+    QVERIFY(playlists.list().empty());
 }
 
 void BackendTests::libraryScannerAdapter() {

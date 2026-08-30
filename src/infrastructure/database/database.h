@@ -25,6 +25,9 @@ public:
     [[nodiscard]] std::optional<domain::Track> findTrack(const domain::TrackId& id) const;
     [[nodiscard]] std::vector<domain::Track> searchTracks(const QString& queryText) const;
     [[nodiscard]] std::vector<domain::Track> loadTracks() const;
+    [[nodiscard]] std::vector<domain::Playlist> loadPlaylists() const;
+    bool savePlaylist(const domain::Playlist& playlist);
+    bool removePlaylist(const domain::PlaylistId& id);
     [[nodiscard]] std::optional<std::string> getSetting(const QString& key) const;
     bool setSetting(const QString& key, const QString& value, const QString& valueType = QStringLiteral("string"));
 

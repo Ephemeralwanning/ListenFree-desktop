@@ -91,6 +91,76 @@ std::vector<domain::Track> Database::loadTracks() const {
     return result;
 }
 
+std::vector<domain::Playlist> Database::loadPlaylists() const {
+    std::vector<domain::Playlist> result;
+    if (!isOpen()) return result;
+    QSqlQuery playlists(db_);
+    if (!playlists.exec(QStringLiteral("SELECT playlist_id,title FROM playlists ORDER BY title"))) return result;
+    while (playlists.next()) {
+        domain::Playlist playlist;
+        playlist.id = domain::PlaylistId(playlists.value(0).toString().toStdString());
+        playlist.title = playlists.value(1).toString().toStdString();
+        QSqlQuery entries(db_);
+        entries.prepare(QStringLiteral("SELECT entry_id,track_id,position FROM playlist_entries WHERE playlist_id = ? ORDER BY position"));
+        entries.addBindValue(playlists.value(0));
+        if (!entries.exec()) return {};
+        while (entries.next()) {
+            playlist.entries.push_back({entries.value(0).toString().toStdString(),
+                                        domain::TrackId(entries.value(1).toString().toStdString()),
+                                        entries.value(2).toInt()});
+        }
+        result.push_back(std::move(playlist));
+    }
+    return result;
+}
+
+bool Database::savePlaylist(const domain::Playlist& playlist) {
+    if (!isOpen() || playlist.id.empty() || playlist.title.empty()) return false;
+    QSqlQuery begin(db_);
+    if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
+    QSqlQuery upsert(db_);
+    upsert.prepare(QStringLiteral("INSERT INTO playlists(playlist_id,title) VALUES(?,?) ON CONFLICT(playlist_id) DO UPDATE SET title=excluded.title"));
+    upsert.addBindValue(QString::fromStdString(playlist.id.value()));
+    upsert.addBindValue(QString::fromStdString(playlist.title));
+    if (!upsert.exec()) {
+        QSqlQuery rollback(db_);
+        rollback.exec(QStringLiteral("ROLLBACK"));
+        return false;
+    }
+    QSqlQuery clear(db_);
+    clear.prepare(QStringLiteral("DELETE FROM playlist_entries WHERE playlist_id = ?"));
+    clear.addBindValue(QString::fromStdString(playlist.id.value()));
+    if (!clear.exec()) {
+        QSqlQuery rollback(db_);
+        rollback.exec(QStringLiteral("ROLLBACK"));
+        return false;
+    }
+    for (const auto& entry : playlist.entries) {
+        if (entry.entryId.empty() || entry.trackId.empty()) continue;
+        QSqlQuery insert(db_);
+        insert.prepare(QStringLiteral("INSERT INTO playlist_entries(entry_id,playlist_id,track_id,position) VALUES(?,?,?,?)"));
+        insert.addBindValue(QString::fromStdString(entry.entryId));
+        insert.addBindValue(QString::fromStdString(playlist.id.value()));
+        insert.addBindValue(QString::fromStdString(entry.trackId.value()));
+        insert.addBindValue(entry.position);
+        if (!insert.exec()) {
+            QSqlQuery rollback(db_);
+            rollback.exec(QStringLiteral("ROLLBACK"));
+            return false;
+        }
+    }
+    QSqlQuery commit(db_);
+    return commit.exec(QStringLiteral("COMMIT"));
+}
+
+bool Database::removePlaylist(const domain::PlaylistId& id) {
+    if (!isOpen() || id.empty()) return false;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("DELETE FROM playlists WHERE playlist_id = ?"));
+    query.addBindValue(QString::fromStdString(id.value()));
+    return query.exec();
+}
+
 std::optional<domain::Track> Database::findTrack(const domain::TrackId& id) const {
     if (!isOpen() || id.empty()) return std::nullopt;
     QSqlQuery query(db_);

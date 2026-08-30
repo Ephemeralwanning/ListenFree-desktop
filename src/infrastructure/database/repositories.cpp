@@ -27,4 +27,10 @@ bool SettingsRepository::set(const std::string& key, const std::string& value) {
     return database_.setSetting(QString::fromStdString(key), QString::fromStdString(value));
 }
 
+std::vector<domain::Playlist> PlaylistRepository::list() { return database_.loadPlaylists(); }
+
+bool PlaylistRepository::save(const domain::Playlist& playlist) { return database_.savePlaylist(playlist); }
+
+bool PlaylistRepository::remove(const domain::PlaylistId& id) { return database_.removePlaylist(id); }
+
 } // namespace listenfree::infrastructure::database
