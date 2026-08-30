@@ -8,8 +8,10 @@
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
     listenfree::qmlbridge::AppController controller;
+    listenfree::qmlbridge::PlayerController playerController;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("appController"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("playerController"), &playerController);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
                      Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("ListenFree.Bootstrap"), QStringLiteral("Main"));

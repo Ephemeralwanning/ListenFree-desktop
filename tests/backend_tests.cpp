@@ -24,6 +24,7 @@ private slots:
     void queueOperations();
     void playbackStateTransitions();
     void audioPlayerDomainAdapter();
+    void playerControllerAdapter();
     void databaseMigrationAndRepository();
     void databasePortRepositories();
     void libraryScannerAdapter();
@@ -67,6 +68,15 @@ void BackendTests::audioPlayerDomainAdapter() {
     item.track.title = "Missing source";
     player.open(item);
     QCOMPARE(player.state(), listenfree::domain::PlaybackState::Idle);
+}
+
+void BackendTests::playerControllerAdapter() {
+    listenfree::qmlbridge::PlayerController controller;
+    QCOMPARE(controller.state(), QStringLiteral("Idle"));
+    controller.openLocal(QString());
+    QCOMPARE(controller.state(), QStringLiteral("Idle"));
+    controller.setVolume(2.0F);
+    controller.seek(0);
 }
 
 void BackendTests::databaseMigrationAndRepository() {

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "application/application_facade.h"
+#include "media/qt_audio_player.h"
 #include "qmlbridge/list_models.h"
 
 #include <QObject>
 #include <QString>
+#include <QUrl>
+#include <QtGlobal>
 #include <memory>
 
 namespace listenfree::qmlbridge {
@@ -47,11 +50,27 @@ signals:
 class PlayerController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
+    Q_PROPERTY(qint64 position READ position NOTIFY positionChanged)
+    Q_PROPERTY(qint64 duration READ duration NOTIFY durationChanged)
 public:
-    explicit PlayerController(QObject* parent = nullptr) : QObject(parent) {}
-    [[nodiscard]] QString state() const { return QStringLiteral("Idle"); }
+    explicit PlayerController(QObject* parent = nullptr);
+    [[nodiscard]] QString state() const;
+    [[nodiscard]] qint64 position() const noexcept;
+    [[nodiscard]] qint64 duration() const noexcept;
+    Q_INVOKABLE void openLocal(const QString& path);
+    Q_INVOKABLE void openUrl(const QUrl& url);
+    Q_INVOKABLE void play();
+    Q_INVOKABLE void pause();
+    Q_INVOKABLE void stop();
+    Q_INVOKABLE void seek(qint64 position);
+    Q_INVOKABLE void setVolume(float volume);
 signals:
     void stateChanged();
+    void positionChanged();
+    void durationChanged();
+    void errorChanged(const QString& message);
+private:
+    std::unique_ptr<media::QtAudioPlayer> player_;
 };
 
 class PlaylistController final : public QObject {
