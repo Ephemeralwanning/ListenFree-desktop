@@ -30,10 +30,16 @@ The repository's governing documents prohibit formal module scaffolding and bulk
 
 ### Recovery steps
 
-1. Complete the missing sections of `docs/design/99-master-plan.md`, including module contracts, milestone definitions, testing gates, rollback points, and the remaining performance-budget decisions.
-2. Obtain explicit user approval and update the plan status and approval record to **Approved** in the design source of truth.
+1. Review `docs/design/05-backend-bootstrap-architecture.md` and the consolidated `docs/design/99-master-plan.md` v0.1.
+2. Obtain explicit user approval and update both status/approval records to **Approved** in the design source of truth.
 3. Rebase or update `backend/bootstrap` from that approved commit without overwriting other work.
-4. Resume at M0, install or select an x64 compiler/CMake/Ninja/Qt toolchain, then implement and verify M0–M5.
+4. Resume at M0 with the verified x64 Qt/CMake/Ninja toolchain, then implement and verify M0–M5. Validate the preferred Qt 6.8 LTS + MSVC 2022 release kit before M5 packaging.
+
+### Progress toward recovery
+
+- On 2026-08-30, `docs/design/05-backend-bootstrap-architecture.md` was prepared with the process boundaries, planned files, public functions, thread model, schema, IPC contract, QML facade, tests, and milestone gates.
+- `docs/design/99-master-plan.md` was expanded from a placeholder into reviewable v0.1 while retaining **Pending approval** status.
+- The installed Qt 6.9.0 MinGW x64, CMake, Ninja, and required Qt modules were configured and verified through project-local scripts. The remaining blocking action is explicit design approval, not environment discovery.
 
 ### Integrity note
 

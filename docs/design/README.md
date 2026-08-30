@@ -4,9 +4,9 @@
 
 ## 当前阶段
 
-- 阶段：需求问答与总纲设计
-- 总纲状态：未批准
-- 允许的工作：只读调研、问答、可丢弃的技术验证、设计文档维护
+- 阶段：总纲与 Backend Bootstrap 架构审阅
+- 总纲状态：待批准
+- 允许的工作：只读调研、问答、可丢弃的技术验证、设计文档与开发环境维护
 - 暂不允许：批量移植、正式模块搭建、从旧项目整包复制代码
 - 最后更新：2026-08-30
 
@@ -17,8 +17,9 @@
 3. `02-questionnaire.md`：问答进度与下一批待确认问题。
 4. `03-figma-and-rust-bridge.md`：Figma → QML 边界及 Rust → Qt 选型记录。
 5. `04-mvp-compatibility-and-release.md`：MVP、格式、旧音源契约、在线服务、性能和发布候选。
-6. `90-codex-execution-guide.md`：AI 自动化实施纪律。
-7. `99-master-plan.md`：最终总纲；当前仍是占位草案。
+6. `05-backend-bootstrap-architecture.md`：Backend Bootstrap 的进程、图层、文件、接口与测试蓝图。
+7. `90-codex-execution-guide.md`：AI 自动化实施纪律。
+8. `99-master-plan.md`：汇总实施总纲；当前等待用户批准。
 
 ## 文档状态规范
 
