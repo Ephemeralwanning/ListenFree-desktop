@@ -47,9 +47,13 @@ void QtAudioPlayer::open(const domain::PlaybackItem& item) {
     } else if (item.track.remoteUrl) {
         open(QUrl(QString::fromStdString(*item.track.remoteUrl)));
     } else {
-        state_ = domain::PlaybackState::Error;
-        emit stateChanged();
-        emit errorChanged(QStringLiteral("playback-item-has-no-source"));
+        // An item without a local or remote source means nothing is loaded;
+        // this is the normal idle state, not a playback failure.
+        player_.setSource(QUrl{});
+        if (state_ != domain::PlaybackState::Idle) {
+            state_ = domain::PlaybackState::Idle;
+            emit stateChanged();
+        }
     }
 }
 

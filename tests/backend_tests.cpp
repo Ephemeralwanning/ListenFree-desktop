@@ -66,7 +66,7 @@ void BackendTests::audioPlayerDomainAdapter() {
     item.track.id = listenfree::domain::TrackId("no-source");
     item.track.title = "Missing source";
     player.open(item);
-    QCOMPARE(player.state(), listenfree::domain::PlaybackState::Error);
+    QCOMPARE(player.state(), listenfree::domain::PlaybackState::Idle);
 }
 
 void BackendTests::databaseMigrationAndRepository() {
