@@ -37,7 +37,7 @@ The repository's governing documents prohibit formal module scaffolding and bulk
 
 ### Progress toward recovery
 
-- On 2026-08-30, `docs/design/05-backend-bootstrap-architecture.md` was prepared with the process boundaries, planned files, public functions, thread model, schema, IPC contract, QML facade, tests, and milestone gates.
+- On 2026-08-30, `docs/design/05-backend-bootstrap-architecture.md` was prepared with functional areas, dependency direction, core interface families, process/thread boundaries, data flow, and milestone gates.
 - `docs/design/99-master-plan.md` was expanded from a placeholder into reviewable v0.1 while retaining **Pending approval** status.
 - The installed Qt 6.9.0 MinGW x64, CMake, Ninja, and required Qt modules were configured and verified through project-local scripts. The remaining blocking action is explicit design approval, not environment discovery.
 

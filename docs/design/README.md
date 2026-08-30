@@ -17,7 +17,7 @@
 3. `02-questionnaire.md`：问答进度与下一批待确认问题。
 4. `03-figma-and-rust-bridge.md`：Figma → QML 边界及 Rust → Qt 选型记录。
 5. `04-mvp-compatibility-and-release.md`：MVP、格式、旧音源契约、在线服务、性能和发布候选。
-6. `05-backend-bootstrap-architecture.md`：Backend Bootstrap 的进程、图层、文件、接口与测试蓝图。
+6. `05-backend-bootstrap-architecture.md`：Backend Bootstrap 的功能区、依赖方向、核心接口与进程边界。
 7. `90-codex-execution-guide.md`：AI 自动化实施纪律。
 8. `99-master-plan.md`：汇总实施总纲；当前等待用户批准。
 

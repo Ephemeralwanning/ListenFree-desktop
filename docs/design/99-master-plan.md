@@ -12,7 +12,7 @@
 3. `02-questionnaire.md`：已确认问答和推迟到后续版本的问题；
 4. `03-figma-and-rust-bridge.md`：QML 生成物、手写包装层与 C++ 后端边界；
 5. `04-mvp-compatibility-and-release.md`：MVP、JS 契约、在线服务、格式、性能与发布；
-6. `05-backend-bootstrap-architecture.md`：进程、图层、文件、公共接口、线程、测试和里程碑。
+6. `05-backend-bootstrap-architecture.md`：功能区、依赖方向、核心接口、进程线程边界和里程碑。
 
 发生冲突时以已确认决策和项目章程为先。候选方案必须保持可替换，不得被包装成已验证能力。
 
@@ -61,7 +61,7 @@ QML -> qmlbridge -> application -> domain ports <- adapters
                          SourceHost client <-> SourceHost process
 ```
 
-详细文件树、函数签名、CMake targets、禁止依赖和 Mermaid 架构图以 `05-backend-bootstrap-architecture.md` 为准。
+功能区、核心接口、禁止依赖和 Mermaid 架构图以 `05-backend-bootstrap-architecture.md` 为准；具体文件与函数在实现阶段按最小可维护方案拆分。
 
 ## 5. 数据与用户文件
 
