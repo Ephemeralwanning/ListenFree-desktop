@@ -15,9 +15,10 @@
 1. `00-project-charter.md`：目标、范围与不可妥协约束。
 2. `01-decisions.md`：已确认决策、候选方案及被否决方案。
 3. `02-questionnaire.md`：问答进度与下一批待确认问题。
-4. `03-figma-and-rust-bridge.md`：Figma → QML 边界及 Rust → Qt PoC 门禁。
-5. `90-codex-execution-guide.md`：AI 自动化实施纪律。
-6. `99-master-plan.md`：最终总纲；当前仍是占位草案。
+4. `03-figma-and-rust-bridge.md`：Figma → QML 边界及 Rust → Qt 选型记录。
+5. `04-mvp-compatibility-and-release.md`：MVP、格式、旧音源契约、在线服务、性能和发布候选。
+6. `90-codex-execution-guide.md`：AI 自动化实施纪律。
+7. `99-master-plan.md`：最终总纲；当前仍是占位草案。
 
 ## 文档状态规范
 

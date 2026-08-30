@@ -6,7 +6,7 @@
 
 1. **Figma to Qt**：当前 Qt 官方的 Figma → QML 工作流。本项目的新设计采用它。
 2. **Qt Bridge for Figma**：旧版设计导出插件，官方已停止积极开发；新项目不选用。
-3. **Qt Bridges for Rust / qtbridge-rust**：Rust 后端与 Qt/QML 的绑定项目，与 Figma 无关；截至 2026-08-30 仍为 Public Beta，必须先做 PoC。
+3. **Qt Bridges for Rust / qtbridge-rust**：Rust 后端与 Qt/QML 的绑定项目，与 Figma 无关；截至 2026-08-30 仍为 Public Beta。本项目已决定不将它作为主后端桥接方案。
 
 官方资料：
 
@@ -42,7 +42,15 @@
 
 Figma to Qt 可以帮助生成项目内容和模块级 CMake 文件，但不能替代完整的顶层构建、应用架构和行为实现。它是高价值的设计交接工具，不是“一键生成完整播放器”。
 
-## Rust → Qt Bridges PoC
+## Rust → Qt Bridges 结论
+
+### 最终决策
+
+主后端采用 C++20 + Qt。Qt Bridges for Rust PoC 已取消，因为本项目主要围绕 QML、Qt 模型、Windows 音频和 C/C++ 媒体库，Rust-first 没有足以抵消 Beta 桥接、双工具链和跨语言调试成本的已证明收益。
+
+只有某个成熟 Rust 模块不可替代且能显著降低实现成本时，才允许通过独立进程或窄 C ABI 接入；不得让这种例外改变 QML 和主应用架构。
+
+## 历史候选记录
 
 ### 采用原因
 
@@ -66,11 +74,11 @@ PoC 必须独立、可删除，且至少验证：
 5. 异步取消、应用退出、异常与 panic 边界。
 6. Debug/Release 调试体验、二进制体积、空闲内存和启动时间。
 
-### 通过与回退
+### 原候选的通过与回退
 
 - 通过：构建和部署可重复，模型与线程语义清晰，没有阻断性崩溃或显著性能退化，才可将 Rust-first 提交为正式 ADR。
 - 不通过：QML 和 Figma 工作流保持不变，桥接层改为薄 C++/Qt Facade；Rust 核心通过窄 C ABI 或独立进程接入。若这仍显著增加复杂度，则直接采用 C++/Qt 后端。
 
 ## 给后续 Codex 的提示
 
-不要因为看见“Qt Bridge”就默认它指 Figma 或 Rust。执行前先判断当前任务是在处理设计导出还是语言绑定。未完成并记录上述 PoC 结果前，不得把 Qt Bridges for Rust 写入总纲的“已批准技术栈”。
+不要因为看见“Qt Bridge”就默认它指 Figma 或 Rust。执行前先判断当前任务是在处理设计导出还是语言绑定。不得把 Qt Bridges for Rust 写入总纲的“已批准技术栈”，也不得自行恢复已取消的 Rust PoC；需要新证据和用户重新确认。
