@@ -209,6 +209,7 @@ void BackendTests::sourceHostRequestTimeout() {
     request.type = listenfree::sourcehost::MessageType::Search;
     request.requestId = QStringLiteral("timeout-1");
     request.payload.insert(QStringLiteral("query"), QStringLiteral("never-replied"));
+    request.payload.insert(QStringLiteral("noReply"), true);
     QVERIFY(client.request(request, 50));
     QTRY_COMPARE_WITH_TIMEOUT(timeoutSpy.count(), 1, 1000);
     QCOMPARE(timeoutSpy.takeFirst().at(0).toString(), QStringLiteral("timeout-1"));

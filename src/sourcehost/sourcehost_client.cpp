@@ -3,6 +3,7 @@
 #include <QDataStream>
 #include <QIODevice>
 #include <QTimer>
+#include <QUuid>
 
 #include <utility>
 
@@ -56,7 +57,10 @@ void SourceHostClient::stop() noexcept {
     stopping_ = true;
     handshakeComplete_ = false;
     clearPending();
-    process_.write("shutdown\n");
+    SourceMessage shutdown;
+    shutdown.type = MessageType::Shutdown;
+    shutdown.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    process_.write(SourceProtocol::encode(shutdown));
     process_.waitForBytesWritten(200);
     if (!process_.waitForFinished(1000)) {
         process_.kill();
@@ -69,8 +73,6 @@ void SourceHostClient::stop() noexcept {
 bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
     if (!running() || message.requestId.isEmpty() || timeoutMs <= 0) return false;
     if (const auto previous = pending_.take(message.requestId); previous) previous->deleteLater();
-    const QByteArray frame = SourceProtocol::encode(message);
-    if (process_.write(frame) != frame.size() || !process_.waitForBytesWritten(200)) return false;
     auto* timer = new QTimer(this);
     timer->setSingleShot(true);
     const QString requestId = message.requestId;
@@ -80,24 +82,34 @@ bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
     });
     pending_.insert(requestId, timer);
     timer->start(timeoutMs);
+    const QByteArray frame = SourceProtocol::encode(message);
+    if (process_.write(frame) != frame.size() || !process_.waitForBytesWritten(200)) {
+        pending_.remove(requestId);
+        timer->stop();
+        timer->deleteLater();
+        return false;
+    }
     return true;
 }
 
 bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
     if (!running()) return false;
-    process_.write("loadPlugin:");
-    process_.write(QString::fromStdString(path.string()).toUtf8());
-    process_.write("\n");
-    return process_.waitForBytesWritten(200);
+    SourceMessage message;
+    message.type = MessageType::LoadPlugin;
+    message.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    message.payload.insert(QStringLiteral("path"), QString::fromStdString(path.string()));
+    return request(message, 5000);
 }
 
 void SourceHostClient::cancel(const std::string& requestId) {
     if (!running()) return;
     const QString id = QString::fromStdString(requestId);
     if (const auto timer = pending_.take(id); timer) timer->deleteLater();
-    process_.write("cancel:");
-    process_.write(QString::fromStdString(requestId).toUtf8());
-    process_.write("\n");
+    SourceMessage message;
+    message.type = MessageType::Cancel;
+    message.requestId = id;
+    message.payload.insert(QStringLiteral("requestId"), id);
+    process_.write(SourceProtocol::encode(message));
     process_.waitForBytesWritten(200);
 }
 
