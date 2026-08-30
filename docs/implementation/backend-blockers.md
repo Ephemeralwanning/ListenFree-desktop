@@ -58,3 +58,7 @@ No placeholder backend, fabricated capability, unmeasured performance result, or
 ### Recovery
 
 Retry a normal `git push` after GitHub/network TLS connectivity recovers. Do not force-push or alter remote history.
+
+## Current baseline note
+
+The historical Qt 6.10.3 setup notes above are superseded by the user's confirmation on 2026-08-30. Qt 6.11.2 MinGW x64 is installed at `F:\qt\6.11.2\mingw_64` and is now the fixed development baseline; Qt version selection is no longer a project blocker.

@@ -2,12 +2,12 @@
 
 This log records reversible backend choices made without blocking design work. Confirmed architecture remains governed by `docs/design`.
 
-## BID-001 — Use Qt 6.10.3 MinGW for bootstrap implementation
+## BID-001 — Use Qt 6.11.2 MinGW for bootstrap implementation
 
 - **Question:** Which Qt kit should bootstrap implementation use now that implementation is authorized?
-- **Choice:** Use Qt 6.10.3 MinGW x64 installed with user-level `aqtinstall` 3.3.0, plus CMake 3.30.5, Ninja 1.12.1 and GCC 13.1 through project-local PowerShell scripts.
-- **Reason:** Qt 6.10.3 is the current stable 6.10 patch release and the machine already has the matching MinGW toolchain. The install includes Qt Quick/QML, SQL, Network, Multimedia, Test and ShaderTools without changing system PATH.
-- **Alternatives:** Install a separate Qt 6.10.3 `msvc2022_64` kit and Visual Studio 2022 Build Tools; use the installed MSVC 14.51 toolset from Visual Studio 2026 Insiders; permanently alter the user PATH.
+- **Choice:** Use Qt 6.11.2 MinGW x64 installed under `F:\qt\6.11.2`, plus CMake 3.30.5, Ninja 1.12.1 and GCC 13.1 through project-local PowerShell scripts.
+- **Reason:** The user confirmed Qt 6.11.2 as the fixed development baseline. The installed kit includes Qt Quick/QML, SQL, Network, Multimedia, Test and ShaderTools without changing system PATH.
+- **Alternatives:** Validate a separate Qt 6.11.2 `msvc2022_64` kit for release packaging; permanently alter the user PATH.
 - **Review later:** Yes. Before release packaging, validate and select the supported MSVC 2022 x64 kit; the bootstrap interfaces must remain compiler/toolchain neutral.
 
 ## BID-002 — Keep environment configuration project-local
@@ -18,9 +18,9 @@ This log records reversible backend choices made without blocking design work. C
 - **Alternatives:** User-level PATH changes; Qt Creator-only kit configuration; system-level PATH changes.
 - **Review later:** No, unless CI requires a different entry point.
 
-## BID-003 — Defer Qt 6.11.2 until the installer feed is reproducible
+## BID-003 — Qt 6.11.2 is now the fixed project baseline
 
-- **Question:** Should the bootstrap immediately move beyond the requested Qt 6.10 line?
-- **Choice:** Keep the verified development kit at Qt 6.10.3 for this milestone; revisit Qt 6.11.2 after a reproducible package feed or official installer is available.
-- **Reason:** Qt 6.11.2 is a newer stable patch release, but the current `aqtinstall` metadata request fails while resolving `Updates.xml`. Switching kits mid-bootstrap would make the build less reproducible than the already-validated Qt 6.10.3 environment.
-- **Review later:** Before release-candidate MSVC validation; the CMake requirement and module boundaries permit a minor-version upgrade without redesign.
+- **Question:** Should later work continue considering alternate Qt versions?
+- **Choice:** No. Use Qt 6.11.2 for all subsequent development and verification unless a concrete Qt bug requires a temporary exception.
+- **Reason:** The user confirmed the local Qt 6.11.2 installation and requested that version selection no longer block implementation.
+- **Review later:** Only when a specific regression or security issue is reproduced.

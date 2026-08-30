@@ -11,8 +11,8 @@ set(CMAKE_AUTOUIC ON)
 
 option(LISTENFREE_BUILD_TESTS "Build ListenFree tests" ON)
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS Core Gui Qml Quick Sql Multimedia Network Concurrent Test)
-qt_standard_project_setup(REQUIRES 6.10)
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core Gui Qml Quick Sql Multimedia Network Concurrent Test)
+qt_standard_project_setup(REQUIRES 6.11)
 
 add_library(listenfree_domain INTERFACE)
 target_include_directories(listenfree_domain INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)

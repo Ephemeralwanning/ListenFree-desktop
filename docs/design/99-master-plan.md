@@ -38,8 +38,8 @@ Backend Bootstrap 必须跑通：
 - 语言：C++20；
 - UI：Qt Quick/QML；
 - 构建：CMake + Ninja；
-- 正式候选：Qt 6.10.3 + MSVC 2022 x64（发布前验证）；
-- 当前可复现验证环境：Qt 6.10.3 MinGW x64、CMake 3.30.5、Ninja 1.12.1、GCC 13.1；
+- 正式候选：Qt 6.11.2 + MSVC 2022 x64（发布前验证）；
+- 当前可复现验证环境：Qt 6.11.2 MinGW x64、CMake 3.30.5、Ninja 1.12.1、GCC 13.1；
 - 数据库：Qt SQL + SQLite；
 - 初始媒体后端：Qt Multimedia；
 - 发布：`windeployqt` + CPack/Inno Setup，GitHub Releases 仅发布 x64 Setup EXE。

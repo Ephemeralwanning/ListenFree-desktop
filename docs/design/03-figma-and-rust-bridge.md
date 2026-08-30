@@ -59,7 +59,7 @@ Qt Bridges for Rust 的方向与“QML 前端 + Rust 后端”匹配，可把 Ru
 ### 当前风险
 
 - 官方状态仍是 Public Beta，API、构建和部署方式可能变化。
-- 当前官方要求 Qt 6.10+、Rust 1.88+、C++ 工具链以及 PATH 中可用的 `qmake`。
+- 当前官方要求 Qt 6.11.2、Rust 1.88+、C++ 工具链以及 PATH 中可用的 `qmake`。
 - Windows 支持以 x64 为主，必须在本项目实际 MSVC/Qt 环境中验证。
 - Beta 依赖不应侵入播放器、数据库或音源核心；桥接层必须可替换。
 

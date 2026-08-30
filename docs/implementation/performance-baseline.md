@@ -4,7 +4,7 @@
 
 - OS：Windows（当前开发机）
 - 架构：x64
-- Qt：6.10.3 MinGW
+- Qt：6.11.2 MinGW
 - 构建：Release
 - 场景：启动 Bootstrap QML，使用 `--platform offscreen`，稳定约 1.5 秒后采样；另以 `--smoke` 测量启动到自动退出
 - 指标：主进程 `PrivateMemorySize64`、`WorkingSet64`、句柄数
