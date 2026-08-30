@@ -1,0 +1,13 @@
+# Local build and test output
+/build/
+/out/
+/dist/
+
+# Qt/CMake generated metadata
+.qt/
+*.user
+*.user.*
+
+# Local profiling and installer logs
+*.log
+*.trace

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($QtRoot)) {
-    $QtRoot = 'F:\qt\6.9.0\mingw_64'
+    $QtRoot = 'F:\qt\6.10.3\mingw_64'
 }
 
 $toolRoots = [ordered]@{

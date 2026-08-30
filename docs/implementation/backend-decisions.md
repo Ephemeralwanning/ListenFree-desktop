@@ -2,13 +2,13 @@
 
 This log records reversible backend choices made without blocking design work. Confirmed architecture remains governed by `docs/design`.
 
-## BID-001 — Use the installed Qt MinGW kit for design-stage verification
+## BID-001 — Use Qt 6.10.3 MinGW for bootstrap implementation
 
-- **Question:** Which local toolchain should be configured before the backend architecture is approved?
-- **Choice:** Use the already installed Qt 6.9.0 MinGW x64 kit with its bundled CMake 3.30.5 and Ninja 1.12.1 through project-local PowerShell scripts.
-- **Reason:** The kit contains every module required by the bootstrap and can be verified immediately without a multi-gigabyte installation or system-wide PATH changes. No matching Qt MSVC kit is currently installed.
-- **Alternatives:** Install Qt 6.8 LTS `msvc2022_64` and Visual Studio 2022 Build Tools now; use the installed MSVC 14.51 toolset from Visual Studio 2026 Insiders; permanently alter the user PATH.
-- **Review later:** Yes. Before the first release build, validate and select the supported production kit, with Qt 6.8 LTS + MSVC 2022 x64 remaining the preferred candidate.
+- **Question:** Which Qt kit should bootstrap implementation use now that implementation is authorized?
+- **Choice:** Use Qt 6.10.3 MinGW x64 installed with user-level `aqtinstall` 3.3.0, plus CMake 3.30.5, Ninja 1.12.1 and GCC 13.1 through project-local PowerShell scripts.
+- **Reason:** Qt 6.10.3 is the current stable 6.10 patch release and the machine already has the matching MinGW toolchain. The install includes Qt Quick/QML, SQL, Network, Multimedia, Test and ShaderTools without changing system PATH.
+- **Alternatives:** Install a separate Qt 6.10.3 `msvc2022_64` kit and Visual Studio 2022 Build Tools; use the installed MSVC 14.51 toolset from Visual Studio 2026 Insiders; permanently alter the user PATH.
+- **Review later:** Yes. Before release packaging, validate and select the supported MSVC 2022 x64 kit; the bootstrap interfaces must remain compiler/toolchain neutral.
 
 ## BID-002 — Keep environment configuration project-local
 
