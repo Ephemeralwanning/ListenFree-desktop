@@ -1,6 +1,7 @@
 #include "domain/domain.h"
 #include "infrastructure/database/database.h"
 #include "infrastructure/database/repositories.h"
+#include "infrastructure/library/library_scanner.h"
 #include "media/playback_state_machine.h"
 #include "online/mock_online_provider.h"
 #include "qmlbridge/controllers.h"
@@ -9,6 +10,7 @@
 
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -22,6 +24,7 @@ private slots:
     void playbackStateTransitions();
     void databaseMigrationAndRepository();
     void databasePortRepositories();
+    void libraryScannerAdapter();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
@@ -94,6 +97,31 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(settings.set("volume", "0.75"));
     QCOMPARE(settings.get("volume").value_or(""), std::string("0.75"));
     QVERIFY(!settings.get("missing").has_value());
+}
+
+void BackendTests::libraryScannerAdapter() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    QFile audio(temp.filePath(QStringLiteral("demo.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.write("not-audio");
+    audio.close();
+    QFile ignored(temp.filePath(QStringLiteral("ignore.txt")));
+    QVERIFY(ignored.open(QIODevice::WriteOnly));
+    ignored.close();
+
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner;
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(temp.path().toStdWString());
+    int found = 0;
+    std::string title;
+    scanner.start(request, [&](listenfree::domain::Track track) {
+        ++found;
+        title = track.title;
+    }, [](std::string) {}, [&] { return false; });
+    QTRY_COMPARE_WITH_TIMEOUT(found, 1, 3000);
+    QCOMPARE(QString::fromStdString(title), QStringLiteral("demo"));
+    scanner.cancel();
 }
 
 void BackendTests::sourceProtocolRoundTrip() {
