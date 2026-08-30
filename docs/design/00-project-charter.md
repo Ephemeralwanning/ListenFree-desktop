@@ -24,6 +24,8 @@
 6. 网易云 API 与 Apple Music 风格歌词允许寻找原生替代方案，不要求保留原库实现。
 7. 可以抛开旧项目的内部架构与历史实现；迁移的是必要行为、数据与兼容契约。
 8. 项目计划主要由 AI 自动化实施，设计文档必须足够明确、可验证、可分阶段执行。
+9. 播放器首个正式目标为 B 级：在基础播放之上实现 Gapless、Crossfade、ReplayGain、EQ 与高解析音频；若关键依赖接入明显拖慢首个可用版本，可暂降为 A 级，稳定后恢复 B 级，最终再演进到 C 级发烧能力。
+10. 前端以 Figma 为视觉设计真源，并优先使用 Qt 官方 Figma to Qt 工作流导入 QML；生成物不直接承载业务逻辑。
 
 ## 核心质量属性
 
@@ -39,10 +41,13 @@
 ## 当前候选系统边界（未批准）
 
 ```text
+Figma Design Source
+        │ Figma to Qt（可再生成的 UI 资产）
+        ▼
 Qt Quick / QML UI
         │ Qt Models / Signals
         ▼
-C++ Qt Application Facade
+Qt Application Facade（Rust / C++ 待 PoC）
         ├── Windows 宿主能力
         ├── 数据模型与业务编排
         └── 可替换的播放接口
@@ -66,4 +71,4 @@ SourceHost 独立进程
 - 让 QML 直接执行 SQL、控制解码器或处理音频 PCM 数据。
 - 在没有参考脚本测试集的情况下宣称 JS 音源“100% 兼容”。
 - 在没有同机基准的情况下宣称某语言或框架必然更省内存。
-
+- 直接修改 Figma to Qt 的生成文件并把业务逻辑写入其中，导致下一次导出无法安全覆盖。

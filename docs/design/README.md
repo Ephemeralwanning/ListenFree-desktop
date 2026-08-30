@@ -15,8 +15,9 @@
 1. `00-project-charter.md`：目标、范围与不可妥协约束。
 2. `01-decisions.md`：已确认决策、候选方案及被否决方案。
 3. `02-questionnaire.md`：问答进度与下一批待确认问题。
-4. `90-codex-execution-guide.md`：AI 自动化实施纪律。
-5. `99-master-plan.md`：最终总纲；当前仍是占位草案。
+4. `03-figma-and-rust-bridge.md`：Figma → QML 边界及 Rust → Qt PoC 门禁。
+5. `90-codex-execution-guide.md`：AI 自动化实施纪律。
+6. `99-master-plan.md`：最终总纲；当前仍是占位草案。
 
 ## 文档状态规范
 
@@ -33,4 +34,3 @@
 3. 性能目标必须包含场景、设备、测量指标和通过阈值。
 4. 引入开源项目时，新增依赖清单；不得仅凭 Star 数或 README 宣称可靠。
 5. 总纲批准后，每个实施阶段都应有输入、输出、测试、性能门禁和回滚点。
-
