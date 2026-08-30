@@ -44,3 +44,17 @@ The repository's governing documents prohibit formal module scaffolding and bulk
 ### Integrity note
 
 No placeholder backend, fabricated capability, unmeasured performance result, or unverified compatibility claim has been created to make the blocked milestones appear complete.
+
+## BLK-002 — GitHub TLS handshake prevents the latest push
+
+- **Observed:** 2026-08-30 (Asia/Shanghai)
+- **Affected work:** Publishing commit `8fc8019` from `backend/bootstrap`
+- **Local state:** Commit is complete and the worktree is clean; the branch is ahead of `origin/backend/bootstrap`
+
+### Evidence
+
+`git push` failed three consecutive times and `git ls-remote --heads origin backend/bootstrap` failed independently with the same Schannel error: `failed to receive handshake, SSL/TLS connection failed`.
+
+### Recovery
+
+Retry a normal `git push` after GitHub/network TLS connectivity recovers. Do not force-push or alter remote history.
