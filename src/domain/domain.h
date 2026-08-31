@@ -31,12 +31,14 @@ using PlaylistId = StrongId<PlaylistIdTag>;
 struct Artist {
     std::string id;
     std::string name;
+    friend bool operator==(const Artist&, const Artist&) = default;
 };
 
 struct Album {
     std::string id;
     std::string title;
     std::optional<std::string> artworkUrl;
+    friend bool operator==(const Album&, const Album&) = default;
 };
 
 struct Track {

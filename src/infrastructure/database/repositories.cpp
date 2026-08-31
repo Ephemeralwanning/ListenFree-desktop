@@ -5,10 +5,7 @@
 namespace listenfree::infrastructure::database {
 
 bool TrackRepository::upsert(std::span<const domain::Track> tracks) {
-    for (const auto& track : tracks) {
-        if (!database_.upsertTrack(track)) return false;
-    }
-    return true;
+    return database_.upsertTracks(tracks);
 }
 
 std::optional<domain::Track> TrackRepository::find(const domain::TrackId& id) {
@@ -17,6 +14,10 @@ std::optional<domain::Track> TrackRepository::find(const domain::TrackId& id) {
 
 std::vector<domain::Track> TrackRepository::search(const std::string& query) {
     return database_.searchTracks(QString::fromStdString(query));
+}
+
+std::vector<application::LocalFileFingerprint> TrackRepository::localFiles() {
+    return database_.loadLocalFiles();
 }
 
 std::optional<std::string> SettingsRepository::get(const std::string& key) {
@@ -32,5 +33,10 @@ std::vector<domain::Playlist> PlaylistRepository::list() { return database_.load
 bool PlaylistRepository::save(const domain::Playlist& playlist) { return database_.savePlaylist(playlist); }
 
 bool PlaylistRepository::remove(const domain::PlaylistId& id) { return database_.removePlaylist(id); }
+
+bool PlayHistoryRepository::record(const domain::TrackId& id,
+                                   std::chrono::system_clock::time_point when) {
+    return database_.recordPlayHistory(id, when);
+}
 
 } // namespace listenfree::infrastructure::database

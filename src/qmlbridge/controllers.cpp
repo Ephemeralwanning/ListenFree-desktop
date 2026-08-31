@@ -75,7 +75,6 @@ void LibraryController::scan(const QStringList& roots) {
     for (const auto& root : roots) {
         if (!root.isEmpty()) request.roots.emplace_back(root.toStdWString());
     }
-
     QPointer<LibraryController> guard(this);
     application::ScanCallbacks callbacks;
     callbacks.onBatch = [guard, generation](std::vector<domain::Track> batch) mutable {
@@ -86,6 +85,7 @@ void LibraryController::scan(const QStringList& roots) {
     };
 
     try {
+        request.knownFiles = repository_.localFiles();
         const auto scanId = scanner_.start(request, std::move(callbacks));
         if (generation == generation_ && scanning_) {
             activeScanId_ = scanId;

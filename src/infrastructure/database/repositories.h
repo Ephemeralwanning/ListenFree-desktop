@@ -12,6 +12,7 @@ public:
     bool upsert(std::span<const domain::Track> tracks) override;
     std::optional<domain::Track> find(const domain::TrackId& id) override;
     std::vector<domain::Track> search(const std::string& query) override;
+    std::vector<application::LocalFileFingerprint> localFiles() override;
 
 private:
     Database& database_;
@@ -35,6 +36,17 @@ public:
     std::vector<domain::Playlist> list() override;
     bool save(const domain::Playlist& playlist) override;
     bool remove(const domain::PlaylistId& id) override;
+
+private:
+    Database& database_;
+};
+
+class PlayHistoryRepository final : public application::IPlayHistoryRepository {
+public:
+    explicit PlayHistoryRepository(Database& database) noexcept : database_(database) {}
+
+    bool record(const domain::TrackId& id,
+                std::chrono::system_clock::time_point when) override;
 
 private:
     Database& database_;

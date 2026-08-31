@@ -2,7 +2,9 @@
 
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QHash>
 #include <QPromise>
+#include <QSet>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <taglib/audioproperties.h>
@@ -41,7 +43,8 @@ LibraryScanner::~LibraryScanner() {
 
 void LibraryScanner::start(const QStringList& roots,
                            std::shared_ptr<application::IMetadataReader> metadataReader,
-                           bool recursive) {
+                           bool recursive,
+                           std::vector<application::LocalFileFingerprint> knownFiles) {
     cancel();
     // Do not replace the watcher future while the previous worker still owns
     // its cancellation token and result buffer. Cancellation is cooperative,
@@ -50,7 +53,19 @@ void LibraryScanner::start(const QStringList& roots,
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     const auto token = cancelled_;
     const auto generation = generation_;
-    watcher_.setFuture(QtConcurrent::run([roots, recursive, token, generation, reader = std::move(metadataReader)](
+    QHash<QString, QPair<quint64, qint64>> known;
+    known.reserve(static_cast<qsizetype>(knownFiles.size()));
+    for (const auto& file : knownFiles) {
+        const QString canonical = QDir::cleanPath(QString::fromStdWString(file.canonicalPath.wstring()));
+#ifdef Q_OS_WIN
+        const QString key = canonical.toCaseFolded();
+#else
+        const QString key = canonical;
+#endif
+        known.insert(key, {static_cast<quint64>(file.sizeBytes), file.modifiedMs});
+    }
+    watcher_.setFuture(QtConcurrent::run([roots, recursive, token, generation, known = std::move(known),
+                                          reader = std::move(metadataReader)](
                                              QPromise<ScanBatchPtr>& promise) {
         if (!reader) {
             auto batch = std::make_shared<ScanBatch>();
@@ -69,6 +84,7 @@ void LibraryScanner::start(const QStringList& roots,
         auto batch = std::make_shared<ScanBatch>();
         batch->generation = generation;
         batch->tracks.reserve(scanBatchSize);
+        QSet<QString> seen;
         const auto flush = [&] {
             if (batch->tracks.isEmpty()) return true;
             if (!promise.addResult(batch)) return false;
@@ -84,7 +100,26 @@ void LibraryScanner::start(const QStringList& roots,
                 QDirIterator it(root, filters, QDir::Files, flags);
                 while (it.hasNext()) {
                     if (token->load() || promise.isCanceled()) return;
-                    const auto path = std::filesystem::path(it.next().toStdWString());
+                    const QFileInfo file(it.next());
+                    // Explicitly exclude links: a library scan must not escape a selected root
+                    // or index the same target under both its real path and an alias.
+                    if (file.isSymLink()) continue;
+                    const QString canonical = QDir::cleanPath(file.canonicalFilePath());
+                    if (canonical.isEmpty() || !file.isFile()) continue;
+#ifdef Q_OS_WIN
+                    const QString key = canonical.toCaseFolded();
+#else
+                    const QString key = canonical;
+#endif
+                    if (seen.contains(key)) continue;
+                    seen.insert(key);
+                    const auto knownFile = known.constFind(key);
+                    if (knownFile != known.cend() &&
+                        knownFile->first == static_cast<quint64>(file.size()) &&
+                        knownFile->second == file.lastModified().toMSecsSinceEpoch()) {
+                        continue;
+                    }
+                    const auto path = std::filesystem::path(canonical.toStdWString());
                     if (auto track = reader->read(path)) batch->tracks.push_back(std::move(*track));
                     if (batch->tracks.size() >= scanBatchSize && !flush()) return;
                 }
@@ -202,7 +237,7 @@ application::ScanId LocalLibraryScannerAdapter::start(const application::ScanReq
     failure_.clear();
     QStringList roots;
     for (const auto& root : request.roots) roots.push_back(QString::fromStdWString(root.wstring()));
-    scanner_.start(roots, metadataReader_, request.recursive);
+    scanner_.start(roots, metadataReader_, request.recursive, request.knownFiles);
     return id;
 }
 

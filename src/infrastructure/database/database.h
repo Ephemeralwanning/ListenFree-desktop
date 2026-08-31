@@ -1,6 +1,6 @@
 #pragma once
 
-#include "domain/domain.h"
+#include "application/ports.h"
 
 #include <QSqlDatabase>
 #include <QString>
@@ -22,16 +22,22 @@ public:
     [[nodiscard]] bool isOpen() const noexcept { return db_.isValid() && db_.isOpen(); }
     bool migrate();
     bool upsertTrack(const domain::Track& track);
+    bool upsertTracks(std::span<const domain::Track> tracks);
     [[nodiscard]] std::optional<domain::Track> findTrack(const domain::TrackId& id) const;
     [[nodiscard]] std::vector<domain::Track> searchTracks(const QString& queryText) const;
     [[nodiscard]] std::vector<domain::Track> loadTracks() const;
+    [[nodiscard]] std::vector<application::LocalFileFingerprint> loadLocalFiles() const;
     [[nodiscard]] std::vector<domain::Playlist> loadPlaylists() const;
     bool savePlaylist(const domain::Playlist& playlist);
     bool removePlaylist(const domain::PlaylistId& id);
+    bool recordPlayHistory(const domain::TrackId& id,
+                           std::chrono::system_clock::time_point when);
     [[nodiscard]] std::optional<std::string> getSetting(const QString& key) const;
     bool setSetting(const QString& key, const QString& value, const QString& valueType = QStringLiteral("string"));
 
 private:
+    bool upsertTrackRows(const domain::Track& track);
+
     QSqlDatabase db_;
     QString connectionName_;
 };

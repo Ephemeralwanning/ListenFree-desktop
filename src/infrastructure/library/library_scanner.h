@@ -27,7 +27,8 @@ public:
     ~LibraryScanner() override;
 
     void start(const QStringList& roots, std::shared_ptr<application::IMetadataReader> metadataReader,
-               bool recursive = true);
+               bool recursive = true,
+               std::vector<application::LocalFileFingerprint> knownFiles = {});
     void cancel();
 
 signals:

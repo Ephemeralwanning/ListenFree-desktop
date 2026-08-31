@@ -13,6 +13,8 @@
 #include <QDataStream>
 #include <QFileInfo>
 #include <QFile>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QtTest>
@@ -23,6 +25,10 @@
 #include <atomic>
 #include <filesystem>
 #include <stdexcept>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 class ThreadRecordingMetadataReader final : public listenfree::application::IMetadataReader {
 public:
@@ -44,6 +50,31 @@ public:
     }
 };
 
+class CountingMetadataReader final : public listenfree::application::IMetadataReader {
+public:
+    std::optional<listenfree::domain::Track> read(const std::filesystem::path& path) override {
+        ++readCount;
+        return fallback.read(path);
+    }
+
+    int readCount{0};
+
+private:
+    listenfree::infrastructure::library::BasicMetadataReader fallback;
+};
+
+class ThrowingFingerprintRepository final : public listenfree::application::ITrackRepository {
+public:
+    bool upsert(std::span<const listenfree::domain::Track>) override { return true; }
+    std::optional<listenfree::domain::Track> find(const listenfree::domain::TrackId&) override {
+        return std::nullopt;
+    }
+    std::vector<listenfree::domain::Track> search(const std::string&) override { return {}; }
+    std::vector<listenfree::application::LocalFileFingerprint> localFiles() override {
+        throw std::runtime_error("fingerprint-load-failed");
+    }
+};
+
 class BackendTests final : public QObject {
     Q_OBJECT
 private slots:
@@ -55,7 +86,9 @@ private slots:
     void playerControllerAdapter();
     void playerControllerProjectsMuteQueueAndLyrics();
     void databaseMigrationAndRepository();
+    void databaseMigrationChecksumRejectsTampering();
     void databasePortRepositories();
+    void databaseTrackRelationsRoundTrip();
     void metadataReaderMapsRegularFile();
     void metadataReaderAcceptsEmptyRegularFile();
     void metadataReaderRejectsMissingFile();
@@ -67,6 +100,10 @@ private slots:
     void libraryScannerAdapterFailureIsTerminal();
     void libraryScannerAdapterContainsBatchCallbackFailure();
     void libraryControllerPersistsScanBatches();
+    void libraryControllerContainsFingerprintFailure();
+    void libraryControllerSkipsUnchangedSizeAndMtime();
+    void libraryScannerExcludesSymbolicLinks();
+    void libraryScannerDeduplicatesOverlappingRoots();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
@@ -235,6 +272,37 @@ void BackendTests::databaseMigrationAndRepository() {
     QVERIFY(!database.isOpen());
 }
 
+void BackendTests::databaseMigrationChecksumRejectsTampering() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const QString path = temp.filePath(QStringLiteral("checksum.sqlite"));
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(path));
+    database.close();
+
+    const QString connectionName = QStringLiteral("checksum-tamper");
+    {
+        QSqlDatabase raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        raw.setDatabaseName(path);
+        QVERIFY(raw.open());
+        QSqlQuery read(raw);
+        QVERIFY(read.exec(QStringLiteral("SELECT checksum FROM schema_migrations WHERE version = 1")));
+        QVERIFY(read.next());
+        const QString checksum = read.value(0).toString();
+        QCOMPARE(checksum.size(), 64);
+        QVERIFY(checksum != QStringLiteral("bootstrap-v1"));
+        QSqlQuery tamper(raw);
+        QVERIFY(tamper.exec(QStringLiteral(
+            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 1")));
+        raw.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    listenfree::infrastructure::database::Database reopened;
+    QVERIFY(!reopened.open(path));
+    QVERIFY(!reopened.isOpen());
+}
+
 void BackendTests::databasePortRepositories() {
     QTemporaryDir temp;
     QVERIFY(temp.isValid());
@@ -244,6 +312,7 @@ void BackendTests::databasePortRepositories() {
     listenfree::infrastructure::database::TrackRepository tracks(database);
     listenfree::infrastructure::database::SettingsRepository settings(database);
     listenfree::infrastructure::database::PlaylistRepository playlists(database);
+    listenfree::infrastructure::database::PlayHistoryRepository history(database);
 
     listenfree::domain::Track first;
     first.id = listenfree::domain::TrackId("repo-1");
@@ -255,6 +324,19 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(tracks.upsert(batch));
     QVERIFY(tracks.find(first.id).has_value());
     QCOMPARE(tracks.search("Repository").size(), std::size_t(1));
+
+    listenfree::domain::Track atomicCandidate;
+    atomicCandidate.id = listenfree::domain::TrackId("repo-atomic");
+    atomicCandidate.title = "Must roll back";
+    listenfree::domain::Track invalidCandidate;
+    invalidCandidate.title = "Missing identifier";
+    const std::array atomicBatch{atomicCandidate, invalidCandidate};
+    QVERIFY(!tracks.upsert(atomicBatch));
+    QVERIFY(!tracks.find(atomicCandidate.id).has_value());
+
+    QVERIFY(history.record(first.id, std::chrono::system_clock::now()));
+    QVERIFY(!history.record(listenfree::domain::TrackId("missing-history-track"),
+                            std::chrono::system_clock::now()));
     QVERIFY(settings.set("volume", "0.75"));
     QCOMPARE(settings.get("volume").value_or(""), std::string("0.75"));
     QVERIFY(!settings.get("missing").has_value());
@@ -276,6 +358,36 @@ void BackendTests::databasePortRepositories() {
     invalid.entries.push_back({"entry-invalid", listenfree::domain::TrackId("missing-track"), 0});
     QVERIFY(!playlists.save(invalid));
     QVERIFY(playlists.list().empty());
+}
+
+void BackendTests::databaseTrackRelationsRoundTrip() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(temp.filePath(QStringLiteral("relations.sqlite"))));
+    listenfree::infrastructure::database::TrackRepository repository(database);
+
+    listenfree::domain::Track track;
+    track.id = listenfree::domain::TrackId("relations-track");
+    track.title = "Relations";
+    track.artists = {{"artist-1", "First Artist"}, {"artist-2", "Second Artist"}};
+    track.album = listenfree::domain::Album{"album-1", "Album", std::string("https://art.invalid/a")};
+    const std::array initial{track};
+    QVERIFY(repository.upsert(initial));
+
+    const auto stored = repository.find(track.id);
+    QVERIFY(stored.has_value());
+    QCOMPARE(stored->artists, track.artists);
+    QCOMPARE(stored->album, track.album);
+
+    track.artists = {{"artist-2", "Renamed Artist"}};
+    track.album.reset();
+    const std::array updated{track};
+    QVERIFY(repository.upsert(updated));
+    const auto replaced = repository.find(track.id);
+    QVERIFY(replaced.has_value());
+    QCOMPARE(replaced->artists, track.artists);
+    QVERIFY(!replaced->album.has_value());
 }
 
 void BackendTests::metadataReaderMapsRegularFile() {
@@ -556,6 +668,122 @@ void BackendTests::libraryControllerPersistsScanBatches() {
     const auto stored = repository.search("controller-track");
     QCOMPARE(stored.size(), std::size_t(1));
     QCOMPARE(stored.front().title, std::string("controller-track"));
+}
+
+void BackendTests::libraryControllerContainsFingerprintFailure() {
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner;
+    ThrowingFingerprintRepository repository;
+    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+
+    controller.scan({QStringLiteral("C:/library")});
+
+    QVERIFY(!controller.scanning());
+    QCOMPARE(controller.lastError(), QStringLiteral("fingerprint-load-failed"));
+}
+
+void BackendTests::libraryControllerSkipsUnchangedSizeAndMtime() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("incremental.mp3"));
+    QFile audio(path);
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    QCOMPARE(audio.write("first"), qint64(5));
+    audio.close();
+
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(directory.filePath(QStringLiteral("incremental.sqlite"))));
+    listenfree::infrastructure::database::TrackRepository repository(database);
+    auto reader = std::make_unique<CountingMetadataReader>();
+    auto* readerProbe = reader.get();
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(std::move(reader));
+    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+
+    controller.scan({directory.path()});
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(readerProbe->readCount, 1);
+    QCOMPARE(controller.importedCount(), quint64(1));
+    QCOMPARE(repository.localFiles().size(), std::size_t(1));
+
+    controller.scan({directory.path()});
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(readerProbe->readCount, 1);
+    QCOMPARE(controller.importedCount(), quint64(0));
+
+    QVERIFY(audio.open(QIODevice::Append));
+    QCOMPARE(audio.write("-changed"), qint64(8));
+    audio.close();
+    controller.scan({directory.path()});
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(readerProbe->readCount, 2);
+    QCOMPARE(controller.importedCount(), quint64(1));
+    const auto fingerprints = repository.localFiles();
+    QCOMPARE(fingerprints.size(), std::size_t(1));
+    QCOMPARE(fingerprints.front().sizeBytes, std::uintmax_t(13));
+}
+
+void BackendTests::libraryScannerExcludesSymbolicLinks() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString realPath = directory.filePath(QStringLiteral("real.mp3"));
+    QFile real(realPath);
+    QVERIFY(real.open(QIODevice::WriteOnly));
+    QCOMPARE(real.write("audio"), qint64(5));
+    real.close();
+    const auto linkPath = std::filesystem::path(
+        directory.filePath(QStringLiteral("alias.mp3")).toStdWString());
+#ifdef Q_OS_WIN
+    const std::wstring target = std::filesystem::path(realPath.toStdWString()).wstring();
+    const std::wstring link = linkPath.wstring();
+    const BOOL linked = CreateSymbolicLinkW(link.c_str(), target.c_str(), 0x2U);
+    QVERIFY2(linked, qPrintable(QStringLiteral("CreateSymbolicLinkW failed: %1")
+                                   .arg(GetLastError())));
+#else
+    std::error_code error;
+    std::filesystem::create_symlink(std::filesystem::path(realPath.toStdWString()), linkPath, error);
+    QVERIFY2(!error, qPrintable(QString::fromStdString(error.message())));
+#endif
+
+    auto reader = std::make_unique<CountingMetadataReader>();
+    auto* readerProbe = reader.get();
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(std::move(reader));
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(directory.path().toStdWString());
+    int tracks = 0;
+    std::optional<listenfree::application::ScanOutcome> outcome;
+    scanner.start(request, {
+        [&](std::vector<listenfree::domain::Track> batch) { tracks += static_cast<int>(batch.size()); },
+        [&](listenfree::application::ScanOutcome value) { outcome = std::move(value); }});
+    QTRY_VERIFY_WITH_TIMEOUT(outcome.has_value(), 3000);
+    QCOMPARE(outcome->status, listenfree::application::ScanStatus::Completed);
+    QCOMPARE(tracks, 1);
+    QCOMPARE(readerProbe->readCount, 1);
+}
+
+void BackendTests::libraryScannerDeduplicatesOverlappingRoots() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QDir root(directory.path());
+    QVERIFY(root.mkpath(QStringLiteral("nested")));
+    QFile audio(root.filePath(QStringLiteral("nested/overlap.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    QCOMPARE(audio.write("audio"), qint64(5));
+    audio.close();
+
+    auto reader = std::make_unique<CountingMetadataReader>();
+    auto* readerProbe = reader.get();
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(std::move(reader));
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(directory.path().toStdWString());
+    request.roots.emplace_back(root.filePath(QStringLiteral("nested")).toStdWString());
+    int tracks = 0;
+    std::optional<listenfree::application::ScanOutcome> outcome;
+    scanner.start(request, {
+        [&](std::vector<listenfree::domain::Track> batch) { tracks += static_cast<int>(batch.size()); },
+        [&](listenfree::application::ScanOutcome value) { outcome = std::move(value); }});
+    QTRY_VERIFY_WITH_TIMEOUT(outcome.has_value(), 3000);
+    QCOMPARE(outcome->status, listenfree::application::ScanStatus::Completed);
+    QCOMPARE(tracks, 1);
+    QCOMPARE(readerProbe->readCount, 1);
 }
 
 void BackendTests::sourceProtocolRoundTrip() {

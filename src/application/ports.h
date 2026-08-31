@@ -31,9 +31,16 @@ constexpr std::uint32_t capabilityMask(PlaybackCapability capability) noexcept {
     return static_cast<std::uint32_t>(capability);
 }
 
+struct LocalFileFingerprint {
+    std::filesystem::path canonicalPath;
+    std::uintmax_t sizeBytes{0};
+    std::int64_t modifiedMs{0};
+};
+
 struct ScanRequest {
     std::vector<std::filesystem::path> roots;
     bool recursive{true};
+    std::vector<LocalFileFingerprint> knownFiles;
 };
 
 using ScanId = std::uint64_t;
@@ -88,6 +95,7 @@ public:
     virtual bool upsert(std::span<const domain::Track> tracks) = 0;
     virtual std::optional<domain::Track> find(const domain::TrackId& id) = 0;
     virtual std::vector<domain::Track> search(const std::string& query) = 0;
+    virtual std::vector<LocalFileFingerprint> localFiles() = 0;
 };
 
 class IPlaylistRepository {
