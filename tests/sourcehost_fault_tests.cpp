@@ -58,9 +58,11 @@ private slots:
     void cleanup() { clearFaultMode(); qunsetenv("LISTENFREE_CHILD_PID_FILE"); }
 
     void startupHandshakeRequest();
+    void failedAndMalformedStartup();
     void cancellationAndTimeoutAreExactlyOnce();
     void writeFailureIsTerminal();
     void crashAutoRestart();
+    void repeatedLifecycleIsStable();
     void gracefulStopCleansProcessTree();
     void forcedTerminationCleansProcessTree();
 };
@@ -78,6 +80,25 @@ void SourceHostFaultTests::startupHandshakeRequest() {
              SourceHostClient::RequestTerminal::Succeeded);
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void SourceHostFaultTests::failedAndMalformedStartup() {
+    {
+        SourceHostClient client(QCoreApplication::applicationDirPath() + QStringLiteral("/missing-sourcehost.exe"));
+        QSignalSpy errors(&client, &SourceHostClient::protocolError);
+        QVERIFY(client.start());
+        QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+        QVERIFY(errors.count() > 0);
+    }
+    for (const QString& fault : {QStringLiteral("bad-handshake"), QStringLiteral("delay-handshake")}) {
+        setFaultMode(fault);
+        SourceHostClient client(faultHostPath());
+        QSignalSpy errors(&client, &SourceHostClient::protocolError);
+        QVERIFY(client.start());
+        QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2500);
+        QVERIFY(errors.count() > 0);
+        clearFaultMode();
+    }
 }
 
 void SourceHostFaultTests::cancellationAndTimeoutAreExactlyOnce() {
@@ -126,14 +147,34 @@ void SourceHostFaultTests::crashAutoRestart() {
     QSignalSpy ready(&client, &SourceHostClient::ready);
     QSignalSpy crashed(&client, &SourceHostClient::crashed);
     QSignalSpy restarted(&client, &SourceHostClient::restarted);
+    QSignalSpy finished(&client, &SourceHostClient::requestFinished);
     QVERIFY(client.start());
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
     QVERIFY(client.request(request(QStringLiteral("crash-1")), 1000));
     QTRY_COMPARE_WITH_TIMEOUT(crashed.count(), 1, 2000);
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(1).value<SourceHostClient::RequestTerminal>(),
+             SourceHostClient::RequestTerminal::HostCrashed);
     QTRY_COMPARE_WITH_TIMEOUT(restarted.count(), 1, 3000);
     QVERIFY(client.running());
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void SourceHostFaultTests::repeatedLifecycleIsStable() {
+    setFaultMode(QStringLiteral("normal"));
+    SourceHostClient client(faultHostPath());
+    for (int i = 0; i < 4; ++i) {
+        QSignalSpy ready(&client, &SourceHostClient::ready);
+        QVERIFY(client.start());
+        QVERIFY(!client.start());
+        QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
+        client.stop();
+        client.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCOMPARE(client.findChildren<QTimer*>().size(), 0);
+    }
 }
 
 void SourceHostFaultTests::gracefulStopCleansProcessTree() {

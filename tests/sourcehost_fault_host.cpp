@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QThread>
 #include <QMetaObject>
+#include <QTimer>
 
 #include <array>
 #include <cstdlib>
@@ -85,10 +86,19 @@ int main(int argc, char* argv[]) {
         if (request.type == MessageType::Hello) {
             SourceMessage ack;
             ack.type = MessageType::HelloAck;
-            ack.requestId = request.requestId;
+            ack.requestId = faultMode == QStringLiteral("bad-handshake")
+                                ? QStringLiteral("wrong-handshake-id")
+                                : request.requestId;
             const QByteArray encoded = SourceProtocol::encode(ack);
-            std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
-            std::cout.flush();
+            if (faultMode == QStringLiteral("delay-handshake")) {
+                QTimer::singleShot(1500, &app, [encoded] {
+                    std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
+                    std::cout.flush();
+                });
+            } else {
+                std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
+                std::cout.flush();
+            }
             if (faultMode == QStringLiteral("writefail")) {
 #ifdef Q_OS_WIN
                 _close(_fileno(stdin));
