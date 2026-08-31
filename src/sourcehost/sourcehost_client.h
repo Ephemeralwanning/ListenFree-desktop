@@ -94,6 +94,7 @@ private:
     JobHandle jobHandle_{nullptr};
 #endif
     static constexpr qsizetype MaxPendingRequests = 256;
+    static constexpr qsizetype MaxRequestIdBytes = 256 * 1024;
     static constexpr qint64 MaxQueuedWriteBytes = 4 * 1024 * 1024;
     static constexpr int MaxRestartAttempts = 3;
     static constexpr int RestartBaseDelayMs = 50;

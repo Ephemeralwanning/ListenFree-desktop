@@ -252,6 +252,10 @@ void SourceHostClient::stop() noexcept {
 
 bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
     if (!running() || !handshakeComplete_ || message.requestId.isEmpty() || timeoutMs <= 0) return false;
+    if (message.requestId.toUtf8().size() > MaxRequestIdBytes) {
+        emit protocolError(QStringLiteral("request-id-too-large"));
+        return false;
+    }
     if (pending_.size() >= MaxPendingRequests) {
         emit protocolError(QStringLiteral("too-many-pending-requests"));
         return false;
@@ -303,6 +307,10 @@ bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
 void SourceHostClient::cancel(const std::string& requestId) {
     if (!running() || !handshakeComplete_) return;
     const QString id = QString::fromStdString(requestId);
+    if (id.toUtf8().size() > MaxRequestIdBytes) {
+        emit protocolError(QStringLiteral("request-id-too-large"));
+        return;
+    }
     if (!finishRequest(id, RequestTerminal::Cancelled)) return;
     SourceMessage message;
     message.type = MessageType::Cancel;

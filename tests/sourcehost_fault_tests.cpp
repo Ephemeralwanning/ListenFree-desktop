@@ -135,6 +135,7 @@ private slots:
     void writeFailureIsTerminal();
     void outboundBackpressureIsBounded();
     void cancellationRespectsOutboundBackpressure();
+    void oversizedRequestIdIsRejected();
     void crashAutoRestart();
     void repeatedLifecycleIsStable();
     void gracefulStopCleansProcessTree();
@@ -277,6 +278,28 @@ void SourceHostFaultTests::cancellationRespectsOutboundBackpressure() {
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 3000);
     QCOMPARE(finished.count(), accepted);
     QVERIFY(cancelWasBounded);
+}
+
+void SourceHostFaultTests::oversizedRequestIdIsRejected() {
+    setFaultMode(QStringLiteral("normal"));
+    SourceHostClient client(faultHostPath());
+    QSignalSpy ready(&client, &SourceHostClient::ready);
+    QSignalSpy errors(&client, &SourceHostClient::protocolError);
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
+
+    const auto oversized = request(QString(256 * 1024 + 1, QChar('x')));
+    QVERIFY(!client.request(oversized, 1000));
+    bool foundBoundedError = false;
+    for (const auto& values : errors) {
+        if (values.at(0).toString() == QStringLiteral("request-id-too-large")) {
+            foundBoundedError = true;
+            break;
+        }
+    }
+    QVERIFY(foundBoundedError);
+    client.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
 }
 
 void SourceHostFaultTests::crashAutoRestart() {
