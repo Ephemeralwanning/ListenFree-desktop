@@ -14,7 +14,22 @@ namespace listenfree::sourcehost {
 
 class SourceHostClient final : public QObject, public application::ISourceHostClient {
     Q_OBJECT
+    Q_PROPERTY(HostState state READ state NOTIFY stateChanged)
 public:
+    enum class HostState { Stopped, Starting, Ready, RestartWaiting, Stopping };
+    Q_ENUM(HostState)
+
+    enum class RequestTerminal {
+        Succeeded,
+        RemoteError,
+        TimedOut,
+        Cancelled,
+        HostStopped,
+        HostCrashed,
+        WriteFailed
+    };
+    Q_ENUM(RequestTerminal)
+
     explicit SourceHostClient(QString executablePath, QObject* parent = nullptr);
     ~SourceHostClient() override;
 
@@ -25,6 +40,7 @@ public:
     bool request(const SourceMessage& message, int timeoutMs = 5000);
     void setAutoRestart(bool enabled) noexcept { autoRestart_ = enabled; }
     [[nodiscard]] bool running() const noexcept { return process_.state() != QProcess::NotRunning; }
+    [[nodiscard]] HostState state() const noexcept { return state_; }
 
 signals:
     void ready();
@@ -32,21 +48,32 @@ signals:
     void restarted();
     void messageReceived(const SourceMessage& message);
     void requestTimedOut(const QString& requestId);
+    void requestFinished(const QString& requestId, RequestTerminal terminal);
     void protocolError(const QString& message);
+    void stateChanged(HostState state);
 
 private:
+    void transitionTo(HostState state);
+    void handleStandardOutput();
+    void failHandshake(const QString& reason);
     void processFrames();
-    void clearPending();
+    bool finishRequest(const QString& requestId, RequestTerminal terminal);
+    void finishAll(RequestTerminal terminal);
 
     QString executablePath_;
     QProcess process_;
     QTimer restartTimer_;
+    QTimer handshakeTimer_;
+    QTimer stopTimer_;
     QByteArray readBuffer_;
+    QString handshakeRequestId_;
     QHash<QString, QPointer<QTimer>> pending_;
     bool stopping_{false};
     bool handshakeComplete_{false};
     bool autoRestart_{true};
+    bool restartInProgress_{false};
     int restartAttempts_{0};
+    HostState state_{HostState::Stopped};
     static constexpr qsizetype MaxPendingRequests = 256;
 };
 

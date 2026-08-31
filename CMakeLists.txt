@@ -99,6 +99,8 @@ if(LISTENFREE_BUILD_TESTS)
     target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client TagLib::tag Qt6::Test Qt6::Sql)
     target_include_directories(listenfree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME listenfree_tests COMMAND listenfree_tests -platform offscreen)
+    add_test(NAME listenfree_smoke COMMAND listenfree --smoke -platform offscreen)
+    set_tests_properties(listenfree_smoke PROPERTIES TIMEOUT 10)
 endif()
 
 if(MSVC)

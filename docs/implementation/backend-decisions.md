@@ -42,3 +42,12 @@ This log records reversible backend choices made without blocking design work. C
 - **Resource constraints:** Delivered batch vectors are cleared immediately; cancellation cancels the future and the worker checks cancellation between files. A single filesystem or TagLib call remains cooperatively, not forcibly, cancellable.
 - **Alternatives:** An explicit mutex/condition-variable channel; one worker per file; GUI-thread metadata parsing.
 - **Review later:** Add measurable progress only when the UI needs it; retain scan generations, batch size and backpressure as implementation details.
+
+## BID-006 — Make SourceHost supervision event-driven
+
+- **Question:** How should SourceHost lifecycle and requests avoid blocking the QML/controller thread?
+- **Choice:** Use QProcess signals plus member handshake, shutdown and restart timers. `start`, `request`, `cancel` and `stop` enqueue work and return without `waitFor*`; only the destructor retains a bounded emergency kill/wait fallback.
+- **Reason:** Process startup, pipe writes and graceful shutdown are nondeterministic I/O. Keeping them inside the event-driven module preserves UI responsiveness and concentrates lifecycle cleanup in one implementation.
+- **Terminal invariant:** Every accepted request ends exactly once as Succeeded, RemoteError, TimedOut, Cancelled, HostStopped, HostCrashed or WriteFailed. Late replies and repeated cancellation cannot complete it again.
+- **Memory constraint:** Pending requests remain capped at 256; timers are deleted at their terminal transition; Host stdin delivery uses capacity-one blocking dispatch rather than accumulating queued frames.
+- **Review later:** Move fault injection to a test Host and attach the Host process tree to a Windows Job Object before a Node runtime is introduced.

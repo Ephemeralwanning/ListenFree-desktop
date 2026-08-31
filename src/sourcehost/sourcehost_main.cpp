@@ -20,6 +20,7 @@ public:
 
 protected:
     void run() override {
+        bool shutdownReceived = false;
         while (!isInterruptionRequested()) {
             std::array<char, 4> header{};
             std::cin.read(header.data(), static_cast<std::streamsize>(header.size()));
@@ -37,13 +38,18 @@ protected:
             frame.append(body);
             const auto handler = handler_;
             QMetaObject::invokeMethod(QCoreApplication::instance(), [handler, frame] { handler(frame); },
-                                      Qt::QueuedConnection);
+                                      Qt::BlockingQueuedConnection);
 
             listenfree::sourcehost::SourceMessage message;
             if (listenfree::sourcehost::SourceProtocol::decode(frame, message) &&
                 message.type == listenfree::sourcehost::MessageType::Shutdown) {
+                shutdownReceived = true;
                 break;
             }
+        }
+        if (!shutdownReceived && !isInterruptionRequested()) {
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [] { QCoreApplication::exit(3); },
+                                      Qt::QueuedConnection);
         }
     }
 
@@ -55,7 +61,6 @@ private:
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
-    std::cout << "listenfree-sourcehost-ready\n" << std::flush;
 
     StdinReader reader([&app](QByteArray frame) {
         listenfree::sourcehost::SourceMessage request;

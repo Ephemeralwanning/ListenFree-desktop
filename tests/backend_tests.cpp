@@ -68,6 +68,8 @@ private slots:
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
     void sourceHostRequestTimeout();
+    void sourceHostCancelIsTerminal();
+    void sourceHostStopCompletesPendingRequests();
     void sourceHostCrashRecovery();
     void sourceHostStopPreventsRestart();
     void sourceHostBoundsPendingRequests();
@@ -500,19 +502,28 @@ void BackendTests::sourceHostProcessLifecycle() {
     const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
     QVERIFY(QFileInfo::exists(executable));
     listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
     QVERIFY(client.start());
     QVERIFY(client.running());
+    QCOMPARE(readySpy.count(), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
     QVERIFY(client.loadPlugin(std::filesystem::path("mock-source.js")));
-    client.cancel("request-1");
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
     client.stop();
-    QVERIFY(!client.running());
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
 }
 
 void BackendTests::sourceHostRequestTimeout() {
     const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
     listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
     QSignalSpy timeoutSpy(&client, &listenfree::sourcehost::SourceHostClient::requestTimedOut);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
     listenfree::sourcehost::SourceMessage request;
     request.type = listenfree::sourcehost::MessageType::Search;
     request.requestId = QStringLiteral("timeout-1");
@@ -520,8 +531,63 @@ void BackendTests::sourceHostRequestTimeout() {
     request.payload.insert(QStringLiteral("noReply"), true);
     QVERIFY(client.request(request, 50));
     QTRY_COMPARE_WITH_TIMEOUT(timeoutSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.count(), 1);
     QCOMPARE(timeoutSpy.takeFirst().at(0).toString(), QStringLiteral("timeout-1"));
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::TimedOut);
     client.stop();
+}
+
+void BackendTests::sourceHostCancelIsTerminal() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy timeoutSpy(&client, &listenfree::sourcehost::SourceHostClient::requestTimedOut);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
+
+    listenfree::sourcehost::SourceMessage request;
+    request.type = listenfree::sourcehost::MessageType::Search;
+    request.requestId = QStringLiteral("cancel-1");
+    request.payload.insert(QStringLiteral("noReply"), true);
+    QVERIFY(client.request(request, 100));
+    client.cancel("cancel-1");
+    client.cancel("cancel-1");
+
+    QCOMPARE(finishedSpy.count(), 1);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Cancelled);
+    QTest::qWait(150);
+    QCOMPARE(timeoutSpy.count(), 0);
+    QCOMPARE(finishedSpy.count(), 0);
+    client.stop();
+}
+
+void BackendTests::sourceHostStopCompletesPendingRequests() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
+
+    for (int index = 0; index < 2; ++index) {
+        listenfree::sourcehost::SourceMessage request;
+        request.type = listenfree::sourcehost::MessageType::Search;
+        request.requestId = QStringLiteral("stop-pending-%1").arg(index);
+        request.payload.insert(QStringLiteral("noReply"), true);
+        QVERIFY(client.request(request, 5000));
+    }
+    client.stop();
+
+    QCOMPARE(finishedSpy.count(), 2);
+    for (const auto& arguments : finishedSpy) {
+        QCOMPARE(arguments.at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+                 listenfree::sourcehost::SourceHostClient::RequestTerminal::HostStopped);
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+    QCOMPARE(finishedSpy.count(), 2);
 }
 
 void BackendTests::sourceHostCrashRecovery() {
@@ -529,7 +595,9 @@ void BackendTests::sourceHostCrashRecovery() {
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy crashedSpy(&client, &listenfree::sourcehost::SourceHostClient::crashed);
     QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
     listenfree::sourcehost::SourceMessage request;
     request.type = listenfree::sourcehost::MessageType::Log;
     request.requestId = QStringLiteral("crash-1");
@@ -548,7 +616,9 @@ void BackendTests::sourceHostStopPreventsRestart() {
     QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
     connect(&client, &listenfree::sourcehost::SourceHostClient::crashed, &client,
             &listenfree::sourcehost::SourceHostClient::stop);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
     listenfree::sourcehost::SourceMessage request;
     request.type = listenfree::sourcehost::MessageType::Log;
     request.requestId = QStringLiteral("crash-stop");
@@ -564,7 +634,9 @@ void BackendTests::sourceHostBoundsPendingRequests() {
     const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy protocolSpy(&client, &listenfree::sourcehost::SourceHostClient::protocolError);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
     for (int index = 0; index < 256; ++index) {
         listenfree::sourcehost::SourceMessage request;
         request.type = listenfree::sourcehost::MessageType::Search;
@@ -578,6 +650,7 @@ void BackendTests::sourceHostBoundsPendingRequests() {
     QVERIFY(!client.request(overflow, 5000));
     QCOMPARE(protocolSpy.takeLast().at(0).toString(), QStringLiteral("too-many-pending-requests"));
     client.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QCOMPARE(client.findChildren<QTimer*>().size(), 0);
 }

@@ -180,6 +180,8 @@ Provider 必须把平台响应转换成内部 `Track`、`Playlist`、`Chart` 和
 
 `ISourceHostClient` 位于主进程，负责宿主启动/停止、插件生命周期、请求、取消、超时和崩溃恢复。`IPluginRuntime` 位于 SourceHost 内部，用于替换 QuickJS、Node 或其他运行时。
 
+SourceHost 的正常命令必须立即返回，不得在 QObject owner 线程调用 `waitFor*`；启动状态通过 Stopped/Starting/Ready/RestartWaiting/Stopping 表达。每个被接受的请求必须且只能产生一个 Succeeded、RemoteError、TimedOut、Cancelled、HostStopped、HostCrashed 或 WriteFailed 终态，停止和崩溃不得静默丢弃 pending 请求。
+
 版本化 IPC 至少表达：
 
 - 握手、加载、卸载、初始化；

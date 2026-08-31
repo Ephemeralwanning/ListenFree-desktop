@@ -12,109 +12,131 @@ namespace listenfree::sourcehost {
 SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
     : QObject(parent), executablePath_(std::move(executablePath)) {
     restartTimer_.setSingleShot(true);
+    handshakeTimer_.setSingleShot(true);
+    stopTimer_.setSingleShot(true);
     connect(&restartTimer_, &QTimer::timeout, this, [this] {
-        if (!stopping_ && start()) emit restarted();
+        if (!stopping_ && start()) restartInProgress_ = true;
     });
-    connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+    connect(&handshakeTimer_, &QTimer::timeout, this, [this] {
+        failHandshake(QStringLiteral("sourcehost-handshake-timeout"));
+    });
+    connect(&stopTimer_, &QTimer::timeout, this, [this] {
+        if (running()) process_.kill();
+    });
+    connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         emit protocolError(process_.errorString());
+        if (error == QProcess::FailedToStart) {
+            handshakeTimer_.stop();
+            transitionTo(HostState::Stopped);
+        }
     });
     connect(&process_, &QProcess::readyReadStandardError, this, [this] {
         const QByteArray error = process_.readAllStandardError().left(4096).trimmed();
         if (!error.isEmpty()) emit protocolError(QString::fromUtf8(error));
     });
-    connect(&process_, &QProcess::readyRead, this, [this] {
-        if (handshakeComplete_) processFrames();
+    connect(&process_, &QProcess::started, this, [this] {
+        SourceMessage hello;
+        hello.type = MessageType::Hello;
+        hello.requestId = handshakeRequestId_;
+        if (process_.write(SourceProtocol::encode(hello)) < 0) {
+            failHandshake(QStringLiteral("sourcehost-hello-write-failed"));
+        }
     });
+    connect(&process_, &QProcess::readyRead, this, &SourceHostClient::handleStandardOutput);
     connect(&process_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
-        clearPending();
-        if (status == QProcess::CrashExit || exitCode != 0) {
+        handshakeTimer_.stop();
+        stopTimer_.stop();
+        handshakeComplete_ = false;
+        const bool failed = status == QProcess::CrashExit || exitCode != 0;
+        if (failed && !stopping_) {
+            finishAll(RequestTerminal::HostCrashed);
             readBuffer_.clear();
             emit crashed();
             if (autoRestart_ && !stopping_ && restartAttempts_ == 0) {
                 ++restartAttempts_;
+                transitionTo(HostState::RestartWaiting);
                 restartTimer_.start(0);
+            } else {
+                transitionTo(HostState::Stopped);
             }
         } else {
+            if (!stopping_) finishAll(RequestTerminal::HostStopped);
             restartAttempts_ = 0;
+            transitionTo(HostState::Stopped);
+        }
+        if (stopping_) {
+            stopping_ = false;
+            restartAttempts_ = 0;
+            restartInProgress_ = false;
+            transitionTo(HostState::Stopped);
         }
     });
 }
 
-SourceHostClient::~SourceHostClient() { stop(); }
+SourceHostClient::~SourceHostClient() {
+    stop();
+    if (running()) {
+        process_.kill();
+        process_.waitForFinished(1000);
+    }
+}
 
 bool SourceHostClient::start() {
     if (running() || executablePath_.isEmpty()) return false;
+    stopTimer_.stop();
     stopping_ = false;
     handshakeComplete_ = false;
+    handshakeRequestId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     readBuffer_.clear();
     process_.start(executablePath_);
-    if (!process_.waitForStarted(1000) || !process_.waitForReadyRead(1000)) {
-        stopping_ = true;
-        process_.kill();
-        process_.waitForFinished(1000);
-        stopping_ = false;
-        readBuffer_.clear();
-        return false;
-    }
-    const QByteArray greeting = process_.readLine().trimmed();
-    if (greeting != QByteArrayLiteral("listenfree-sourcehost-ready")) {
-        emit protocolError(QStringLiteral("invalid-sourcehost-greeting"));
-        stop();
-        return false;
-    }
-    handshakeComplete_ = true;
-    emit ready();
+    handshakeTimer_.start(1000);
+    transitionTo(HostState::Starting);
     return true;
 }
 
 void SourceHostClient::stop() noexcept {
     stopping_ = true;
     restartTimer_.stop();
+    handshakeTimer_.stop();
     handshakeComplete_ = false;
-    clearPending();
+    finishAll(RequestTerminal::HostStopped);
     readBuffer_.clear();
     if (!running()) {
         restartAttempts_ = 0;
+        restartInProgress_ = false;
+        transitionTo(HostState::Stopped);
         return;
     }
     SourceMessage shutdown;
     shutdown.type = MessageType::Shutdown;
     shutdown.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     process_.write(SourceProtocol::encode(shutdown));
-    process_.waitForBytesWritten(200);
-    if (!process_.waitForFinished(1000)) {
-        process_.kill();
-        process_.waitForFinished(1000);
-    }
-    stopping_ = false;
-    restartAttempts_ = 0;
+    stopTimer_.start(1000);
+    transitionTo(HostState::Stopping);
 }
 
 bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
-    if (!running() || message.requestId.isEmpty() || timeoutMs <= 0) return false;
+    if (!running() || !handshakeComplete_ || message.requestId.isEmpty() || timeoutMs <= 0) return false;
     if (pending_.size() >= MaxPendingRequests) {
         emit protocolError(QStringLiteral("too-many-pending-requests"));
         return false;
     }
-    if (const auto previous = pending_.take(message.requestId); previous) {
-        previous->stop();
-        previous->deleteLater();
+    if (pending_.contains(message.requestId)) {
+        emit protocolError(QStringLiteral("duplicate-request-id"));
+        return false;
     }
     auto* timer = new QTimer(this);
     timer->setSingleShot(true);
     const QString requestId = message.requestId;
-    connect(timer, &QTimer::timeout, this, [this, requestId, timer] {
-        pending_.remove(requestId);
-        timer->deleteLater();
+    connect(timer, &QTimer::timeout, this, [this, requestId] {
+        if (!finishRequest(requestId, RequestTerminal::TimedOut)) return;
         emit requestTimedOut(requestId);
     });
     pending_.insert(requestId, timer);
     timer->start(timeoutMs);
     const QByteArray frame = SourceProtocol::encode(message);
-    if (process_.write(frame) != frame.size() || !process_.waitForBytesWritten(200)) {
-        pending_.remove(requestId);
-        timer->stop();
-        timer->deleteLater();
+    if (process_.write(frame) != frame.size()) {
+        finishRequest(requestId, RequestTerminal::WriteFailed);
         return false;
     }
     return true;
@@ -130,26 +152,48 @@ bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
 }
 
 void SourceHostClient::cancel(const std::string& requestId) {
-    if (!running()) return;
+    if (!running() || !handshakeComplete_) return;
     const QString id = QString::fromStdString(requestId);
-    if (const auto timer = pending_.take(id); timer) {
-        timer->stop();
-        timer->deleteLater();
-    }
+    if (!finishRequest(id, RequestTerminal::Cancelled)) return;
     SourceMessage message;
     message.type = MessageType::Cancel;
     message.requestId = id;
     message.payload.insert(QStringLiteral("requestId"), id);
     process_.write(SourceProtocol::encode(message));
-    process_.waitForBytesWritten(200);
 }
 
-void SourceHostClient::clearPending() {
-    for (const auto& timer : pending_) {
-        if (timer) timer->stop();
-        if (timer) timer->deleteLater();
-    }
-    pending_.clear();
+void SourceHostClient::handleStandardOutput() {
+    processFrames();
+}
+
+void SourceHostClient::transitionTo(HostState state) {
+    if (state_ == state) return;
+    state_ = state;
+    emit stateChanged(state_);
+}
+
+void SourceHostClient::failHandshake(const QString& reason) {
+    if (handshakeComplete_ || process_.state() == QProcess::NotRunning) return;
+    handshakeTimer_.stop();
+    emit protocolError(reason);
+    stopping_ = true;
+    restartInProgress_ = false;
+    transitionTo(HostState::Stopping);
+    process_.kill();
+}
+
+bool SourceHostClient::finishRequest(const QString& requestId, RequestTerminal terminal) {
+    const auto timer = pending_.take(requestId);
+    if (!timer) return false;
+    timer->stop();
+    timer->deleteLater();
+    emit requestFinished(requestId, terminal);
+    return true;
+}
+
+void SourceHostClient::finishAll(RequestTerminal terminal) {
+    const auto requestIds = pending_.keys();
+    for (const auto& requestId : requestIds) finishRequest(requestId, terminal);
 }
 
 void SourceHostClient::processFrames() {
@@ -174,13 +218,25 @@ void SourceHostClient::processFrames() {
             emit protocolError(error);
             continue;
         }
-        const bool completesRequest = message.type == MessageType::Result || message.type == MessageType::Error ||
-                                      message.type == MessageType::HelloAck;
-        if (completesRequest) {
-            if (const auto timer = pending_.take(message.requestId); timer) {
-                timer->stop();
-                timer->deleteLater();
+        if (!handshakeComplete_) {
+            if (message.type != MessageType::HelloAck || message.requestId != handshakeRequestId_) {
+                failHandshake(QStringLiteral("invalid-sourcehost-handshake"));
+                return;
             }
+            handshakeTimer_.stop();
+            handshakeComplete_ = true;
+            transitionTo(HostState::Ready);
+            emit ready();
+            if (restartInProgress_) {
+                restartInProgress_ = false;
+                emit restarted();
+            }
+            continue;
+        }
+        if (message.type == MessageType::Result) {
+            finishRequest(message.requestId, RequestTerminal::Succeeded);
+        } else if (message.type == MessageType::Error) {
+            finishRequest(message.requestId, RequestTerminal::RemoteError);
         }
         emit messageReceived(message);
     }
