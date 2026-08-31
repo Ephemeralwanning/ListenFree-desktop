@@ -41,7 +41,9 @@ public:
     void cancel(const std::string& requestId) override;
     bool request(const SourceMessage& message, int timeoutMs = 5000);
     void setAutoRestart(bool enabled) noexcept { autoRestart_ = enabled; }
-    [[nodiscard]] bool running() const noexcept { return process_.state() != QProcess::NotRunning; }
+    [[nodiscard]] bool running() const noexcept {
+        return process_ && process_->state() != QProcess::NotRunning;
+    }
     [[nodiscard]] HostState state() const noexcept { return state_; }
 
 signals:
@@ -74,8 +76,9 @@ private:
     void finishAll(RequestTerminal terminal);
 
     QString executablePath_;
-    QProcess process_;
+    std::unique_ptr<QProcess> process_;
     QTimer restartTimer_;
+    QTimer restartStabilityTimer_;
     QTimer handshakeTimer_;
     QTimer stopTimer_;
     QByteArray readBuffer_;
@@ -91,6 +94,10 @@ private:
     JobHandle jobHandle_{nullptr};
 #endif
     static constexpr qsizetype MaxPendingRequests = 256;
+    static constexpr qint64 MaxQueuedWriteBytes = 4 * 1024 * 1024;
+    static constexpr int MaxRestartAttempts = 3;
+    static constexpr int RestartBaseDelayMs = 50;
+    static constexpr int RestartStableMs = 2000;
 };
 
 } // namespace listenfree::sourcehost

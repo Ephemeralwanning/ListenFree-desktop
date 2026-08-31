@@ -1,7 +1,9 @@
 #include "sourcehost/sourcehost_client.h"
 
 #include <QDataStream>
+#include <QCoreApplication>
 #include <QIODevice>
+#include <QPointer>
 #include <QTimer>
 #include <QUuid>
 
@@ -12,6 +14,33 @@
 #endif
 
 namespace listenfree::sourcehost {
+
+namespace {
+
+class ProcessReaper final : public QObject {
+public:
+    static ProcessReaper* instance() {
+        static QPointer<ProcessReaper> reaper;
+        if (!reaper) {
+            auto* application = QCoreApplication::instance();
+            if (application == nullptr || QCoreApplication::closingDown()) return nullptr;
+            reaper = new ProcessReaper(application);
+        }
+        return reaper;
+    }
+
+    void adopt(std::unique_ptr<QProcess> process) {
+        QProcess* raw = process.release();
+        raw->setParent(this);
+        QObject::connect(raw, &QProcess::finished, raw, &QObject::deleteLater);
+        if (raw->state() == QProcess::NotRunning) raw->deleteLater();
+    }
+
+private:
+    explicit ProcessReaper(QObject* parent) : QObject(parent) {}
+};
+
+} // namespace
 
 #ifdef Q_OS_WIN
 void SourceHostClient::JobHandleDeleter::operator()(void* handle) const noexcept {
@@ -40,7 +69,7 @@ bool SourceHostClient::createJobObject() {
 
 bool SourceHostClient::assignProcessToJob() {
     if (!jobHandle_) return false;
-    const auto processId = static_cast<DWORD>(process_.processId());
+    const auto processId = static_cast<DWORD>(process_->processId());
     if (processId == 0) return false;
     HANDLE processHandle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
                                        FALSE, processId);
@@ -74,22 +103,26 @@ void SourceHostClient::closeJobObject() noexcept {}
 #endif
 
 SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
-    : QObject(parent), executablePath_(std::move(executablePath)) {
+    : QObject(parent), executablePath_(std::move(executablePath)), process_(std::make_unique<QProcess>()) {
     restartTimer_.setSingleShot(true);
+    restartStabilityTimer_.setSingleShot(true);
     handshakeTimer_.setSingleShot(true);
     stopTimer_.setSingleShot(true);
     connect(&restartTimer_, &QTimer::timeout, this, [this] {
         if (!stopping_ && start()) restartInProgress_ = true;
+    });
+    connect(&restartStabilityTimer_, &QTimer::timeout, this, [this] {
+        if (state_ == HostState::Ready) restartAttempts_ = 0;
     });
     connect(&handshakeTimer_, &QTimer::timeout, this, [this] {
         failHandshake(QStringLiteral("sourcehost-handshake-timeout"));
     });
     connect(&stopTimer_, &QTimer::timeout, this, [this] {
         terminateProcessTree();
-        if (running()) process_.kill();
+        if (running()) process_->kill();
     });
-    connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        emit protocolError(process_.errorString());
+    connect(process_.get(), &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        emit protocolError(process_->errorString());
         if (error == QProcess::WriteError) {
             finishAll(RequestTerminal::WriteFailed);
         }
@@ -99,32 +132,33 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
             transitionTo(HostState::Stopped);
         }
     });
-    connect(&process_, &QProcess::readyReadStandardError, this, [this] {
-        const QByteArray error = process_.readAllStandardError().left(4096).trimmed();
+    connect(process_.get(), &QProcess::readyReadStandardError, this, [this] {
+        const QByteArray error = process_->readAllStandardError().left(4096).trimmed();
         if (!error.isEmpty()) emit protocolError(QString::fromUtf8(error));
     });
-    connect(&process_, &QProcess::started, this, [this] {
+    connect(process_.get(), &QProcess::started, this, [this] {
         if (stopping_) {
             terminateProcessTree();
-            process_.kill();
+            process_->kill();
             return;
         }
         if (!assignProcessToJob()) {
             stopping_ = true;
             transitionTo(HostState::Stopping);
-            process_.kill();
+            process_->kill();
             return;
         }
         SourceMessage hello;
         hello.type = MessageType::Hello;
         hello.requestId = handshakeRequestId_;
-        if (process_.write(SourceProtocol::encode(hello)) < 0) {
+        if (process_->write(SourceProtocol::encode(hello)) < 0) {
             failHandshake(QStringLiteral("sourcehost-hello-write-failed"));
         }
     });
-    connect(&process_, &QProcess::readyRead, this, &SourceHostClient::handleStandardOutput);
-    connect(&process_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
+    connect(process_.get(), &QProcess::readyRead, this, &SourceHostClient::handleStandardOutput);
+    connect(process_.get(), &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
         handshakeTimer_.stop();
+        restartStabilityTimer_.stop();
         stopTimer_.stop();
         closeJobObject();
         handshakeComplete_ = false;
@@ -133,10 +167,11 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
             finishAll(RequestTerminal::HostCrashed);
             readBuffer_.clear();
             emit crashed();
-            if (autoRestart_ && !stopping_ && restartAttempts_ == 0) {
+            if (autoRestart_ && !stopping_ && restartAttempts_ < MaxRestartAttempts) {
+                const int delay = RestartBaseDelayMs << restartAttempts_;
                 ++restartAttempts_;
                 transitionTo(HostState::RestartWaiting);
-                restartTimer_.start(0);
+                restartTimer_.start(delay);
             } else {
                 transitionTo(HostState::Stopped);
             }
@@ -155,25 +190,39 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
 }
 
 SourceHostClient::~SourceHostClient() {
-    stop();
+    restartTimer_.stop();
+    restartStabilityTimer_.stop();
+    handshakeTimer_.stop();
+    stopTimer_.stop();
+    stopping_ = true;
+    QObject::disconnect(process_.get(), nullptr, this, nullptr);
+    finishAll(RequestTerminal::HostStopped);
+    readBuffer_.clear();
     if (running()) {
         terminateProcessTree();
-        process_.kill();
+        process_->kill();
     }
     closeJobObject();
+    if (running()) {
+        if (auto* reaper = ProcessReaper::instance()) reaper->adopt(std::move(process_));
+    }
 }
 
 bool SourceHostClient::start() {
-    if (running() || executablePath_.isEmpty()) return false;
+    if (running() || executablePath_.isEmpty() ||
+        (state_ != HostState::Stopped && state_ != HostState::RestartWaiting)) {
+        return false;
+    }
 #ifdef Q_OS_WIN
     if (!createJobObject()) return false;
 #endif
+    if (state_ == HostState::Stopped) restartAttempts_ = 0;
     stopTimer_.stop();
     stopping_ = false;
     handshakeComplete_ = false;
     handshakeRequestId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     readBuffer_.clear();
-    process_.start(executablePath_);
+    process_->start(executablePath_);
     handshakeTimer_.start(1000);
     transitionTo(HostState::Starting);
     return true;
@@ -182,6 +231,7 @@ bool SourceHostClient::start() {
 void SourceHostClient::stop() noexcept {
     stopping_ = true;
     restartTimer_.stop();
+    restartStabilityTimer_.stop();
     handshakeTimer_.stop();
     handshakeComplete_ = false;
     finishAll(RequestTerminal::HostStopped);
@@ -195,7 +245,7 @@ void SourceHostClient::stop() noexcept {
     SourceMessage shutdown;
     shutdown.type = MessageType::Shutdown;
     shutdown.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    process_.write(SourceProtocol::encode(shutdown));
+    process_->write(SourceProtocol::encode(shutdown));
     stopTimer_.start(1000);
     transitionTo(HostState::Stopping);
 }
@@ -210,6 +260,15 @@ bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
         emit protocolError(QStringLiteral("duplicate-request-id"));
         return false;
     }
+    const QByteArray frame = SourceProtocol::encode(message);
+    if (frame.size() <= 4 || frame.size() > (1024 * 1024 + 4)) {
+        emit protocolError(QStringLiteral("outgoing-frame-too-large"));
+        return false;
+    }
+    if (process_->bytesToWrite() + frame.size() > MaxQueuedWriteBytes) {
+        emit protocolError(QStringLiteral("outgoing-write-buffer-full"));
+        return false;
+    }
     auto* timer = new QTimer(this);
     timer->setSingleShot(true);
     const QString requestId = message.requestId;
@@ -219,13 +278,7 @@ bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
     });
     pending_.insert(requestId, timer);
     timer->start(timeoutMs);
-    const QByteArray frame = SourceProtocol::encode(message);
-    if (frame.size() <= 4 || frame.size() > (1024 * 1024 + 4)) {
-        emit protocolError(QStringLiteral("outgoing-frame-too-large"));
-        finishRequest(requestId, RequestTerminal::WriteFailed);
-        return false;
-    }
-    if (process_.write(frame) != frame.size()) {
+    if (process_->write(frame) != frame.size()) {
         finishRequest(requestId, RequestTerminal::WriteFailed);
         return false;
     }
@@ -249,7 +302,18 @@ void SourceHostClient::cancel(const std::string& requestId) {
     message.type = MessageType::Cancel;
     message.requestId = id;
     message.payload.insert(QStringLiteral("requestId"), id);
-    process_.write(SourceProtocol::encode(message));
+    const QByteArray frame = SourceProtocol::encode(message);
+    if (frame.size() <= 4 || frame.size() > (1024 * 1024 + 4)) {
+        emit protocolError(QStringLiteral("outgoing-frame-too-large"));
+        return;
+    }
+    if (process_->bytesToWrite() + frame.size() > MaxQueuedWriteBytes) {
+        emit protocolError(QStringLiteral("outgoing-write-buffer-full"));
+        return;
+    }
+    if (process_->write(frame) != frame.size()) {
+        emit protocolError(QStringLiteral("sourcehost-cancel-write-failed"));
+    }
 }
 
 void SourceHostClient::handleStandardOutput() {
@@ -263,13 +327,13 @@ void SourceHostClient::transitionTo(HostState state) {
 }
 
 void SourceHostClient::failHandshake(const QString& reason) {
-    if (handshakeComplete_ || process_.state() == QProcess::NotRunning) return;
+    if (handshakeComplete_ || process_->state() == QProcess::NotRunning) return;
     handshakeTimer_.stop();
     emit protocolError(reason);
     stopping_ = true;
     restartInProgress_ = false;
     transitionTo(HostState::Stopping);
-    process_.kill();
+    process_->kill();
 }
 
 bool SourceHostClient::finishRequest(const QString& requestId, RequestTerminal terminal) {
@@ -287,7 +351,7 @@ void SourceHostClient::finishAll(RequestTerminal terminal) {
 }
 
 void SourceHostClient::processFrames() {
-    readBuffer_.append(process_.readAll());
+    readBuffer_.append(process_->readAll());
     while (readBuffer_.size() >= 4) {
         QDataStream header(readBuffer_.left(4));
         header.setByteOrder(QDataStream::BigEndian);
@@ -315,6 +379,7 @@ void SourceHostClient::processFrames() {
             }
             handshakeTimer_.stop();
             handshakeComplete_ = true;
+            restartStabilityTimer_.start(RestartStableMs);
             transitionTo(HostState::Ready);
             emit ready();
             if (restartInProgress_) {

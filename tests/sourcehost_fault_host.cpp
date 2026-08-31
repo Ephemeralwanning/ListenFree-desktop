@@ -52,9 +52,15 @@ protected:
             QMetaObject::invokeMethod(QCoreApplication::instance(), [handler, frame] { handler(frame); },
                                       Qt::BlockingQueuedConnection);
             SourceMessage message;
-            if (SourceProtocol::decode(frame, message) && message.type == MessageType::Shutdown) {
-                shutdownReceived = true;
-                break;
+            if (SourceProtocol::decode(frame, message)) {
+                if (message.type == MessageType::Shutdown) {
+                    shutdownReceived = true;
+                    break;
+                }
+                if (message.type == MessageType::Hello && mode() == QStringLiteral("backpressure")) {
+                    while (!isInterruptionRequested()) QThread::msleep(10);
+                    break;
+                }
             }
         }
         if (!shutdownReceived && !isInterruptionRequested() && mode() != QStringLiteral("writefail")) {
@@ -71,6 +77,28 @@ private:
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
+    const QStringList arguments = app.arguments();
+    if (arguments.size() == 3 && arguments.at(1) == QStringLiteral("--tree-child")) {
+        QProcess grandchild;
+        const QString pidFile = arguments.at(2);
+        QObject::connect(&grandchild, &QProcess::started, &app, [&grandchild, pidFile] {
+            QFile file(pidFile);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+                file.write(QByteArray::number(QCoreApplication::applicationPid()));
+                file.write("\n");
+                file.write(QByteArray::number(grandchild.processId()));
+                file.flush();
+            }
+        });
+#ifdef Q_OS_WIN
+        grandchild.start(QStringLiteral("ping.exe"),
+                         {QStringLiteral("127.0.0.1"), QStringLiteral("-n"), QStringLiteral("60")});
+#else
+        grandchild.start(QStringLiteral("sleep"), {QStringLiteral("60")});
+#endif
+        return app.exec();
+    }
+
     const QString faultMode = mode();
     QProcess* spawned = nullptr;
 
@@ -112,16 +140,16 @@ int main(int argc, char* argv[]) {
             if (request.payload.value(QStringLiteral("spawnTree")).toBool() && spawned == nullptr) {
                 spawned = new QProcess(&app);
                 const QString pidFile = qEnvironmentVariable("LISTENFREE_CHILD_PID_FILE");
-                QObject::connect(spawned, &QProcess::started, &app, [spawned, pidFile] {
-                    if (pidFile.isEmpty()) return;
+                if (!pidFile.isEmpty()) {
                     QFile file(pidFile);
                     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                        file.write(QByteArray::number(spawned->processId()));
+                        file.write(QByteArray::number(QCoreApplication::applicationPid()));
+                        file.write("\n");
                         file.flush();
                     }
-                });
-                spawned->start(QStringLiteral("cmd.exe"),
-                               {QStringLiteral("/c"), QStringLiteral("ping 127.0.0.1 -n 60 >nul")});
+                }
+                spawned->start(QCoreApplication::applicationFilePath(),
+                               {QStringLiteral("--tree-child"), pidFile});
             }
             return;
         }
