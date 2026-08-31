@@ -143,6 +143,8 @@ SQLite 是首个实现，但应用层不依赖 SQLite 类。首次 schema 覆盖
 
 `ILocalLibraryScanner` 负责目录遍历、候选文件筛选、增量判断、进度和取消；`IMetadataReader` 只负责读取单个文件并返回标准化元数据。
 
+扫描接口以 `ScanId` 标识一次运行：`start` 只交付有界 `Track` 批次，并且最终恰好回调一次 `Completed`、`Cancelled` 或 `Failed`；`cancel(ScanId)` 幂等，错误或过期 ID 不影响当前扫描。具体批大小、背压队列和内部 generation 属于扫描 module 的实现细节，不扩散到控制器和 QML。
+
 扫描范围只能来自用户配置目录，默认不跟随目录符号链接，不复制、不移动、不改写音乐文件。
 
 ### 4.3 播放器

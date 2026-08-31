@@ -35,7 +35,19 @@ struct ScanRequest {
     bool recursive{true};
 };
 
-using CancelCallback = std::function<bool()>;
+using ScanId = std::uint64_t;
+
+enum class ScanStatus { Completed, Cancelled, Failed };
+
+struct ScanOutcome {
+    ScanStatus status{ScanStatus::Completed};
+    std::string error;
+};
+
+struct ScanCallbacks {
+    std::function<void(std::vector<domain::Track>)> onBatch;
+    std::function<void(ScanOutcome)> onFinished;
+};
 
 class ITrackRepository {
 public:
@@ -69,9 +81,8 @@ public:
 class ILocalLibraryScanner {
 public:
     virtual ~ILocalLibraryScanner() = default;
-    virtual void start(const ScanRequest&, std::function<void(domain::Track)> onTrack,
-                       std::function<void(std::string)> onError, CancelCallback cancelled) = 0;
-    virtual void cancel() = 0;
+    virtual ScanId start(const ScanRequest&, ScanCallbacks callbacks) = 0;
+    virtual void cancel(ScanId id) noexcept = 0;
 };
 
 class IMetadataReader {

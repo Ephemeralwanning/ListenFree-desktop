@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
+#include <stdexcept>
 
 class ThreadRecordingMetadataReader final : public listenfree::application::IMetadataReader {
 public:
@@ -34,6 +35,13 @@ public:
 
 private:
     listenfree::infrastructure::library::BasicMetadataReader fallback;
+};
+
+class ThrowingMetadataReader final : public listenfree::application::IMetadataReader {
+public:
+    std::optional<listenfree::domain::Track> read(const std::filesystem::path&) override {
+        throw std::runtime_error("metadata-read-failed");
+    }
 };
 
 class BackendTests final : public QObject {
@@ -52,6 +60,10 @@ private slots:
     void tagLibMetadataReaderMapsWavTags();
     void libraryScannerUsesBoundedBatchesOffOwnerThread();
     void libraryScannerAdapter();
+    void libraryScannerAdapterCancellationIsTerminal();
+    void libraryScannerAdapterFailureIsTerminal();
+    void libraryScannerAdapterContainsBatchCallbackFailure();
+    void libraryControllerPersistsScanBatches();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
@@ -337,13 +349,123 @@ void BackendTests::libraryScannerAdapter() {
     request.roots.emplace_back(temp.path().toStdWString());
     int found = 0;
     std::string title;
-    scanner.start(request, [&](listenfree::domain::Track track) {
-        ++found;
-        title = track.title;
-    }, [](std::string) {}, [&] { return false; });
-    QTRY_COMPARE_WITH_TIMEOUT(found, 1, 3000);
+    std::optional<listenfree::application::ScanOutcome> outcome;
+    scanner.start(request, {
+        [&](std::vector<listenfree::domain::Track> tracks) {
+            found += static_cast<int>(tracks.size());
+            if (!tracks.empty()) title = tracks.front().title;
+        },
+        [&](listenfree::application::ScanOutcome result) { outcome = std::move(result); }
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(outcome.has_value(), 3000);
+    QCOMPARE(outcome->status, listenfree::application::ScanStatus::Completed);
+    QCOMPARE(found, 1);
     QCOMPARE(QString::fromStdString(title), QStringLiteral("demo"));
-    scanner.cancel();
+}
+
+void BackendTests::libraryScannerAdapterCancellationIsTerminal() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile audio(directory.filePath(QStringLiteral("cancel.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.close();
+
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(directory.path().toStdWString());
+    int terminalCalls = 0;
+    listenfree::application::ScanStatus status = listenfree::application::ScanStatus::Completed;
+    const auto id = scanner.start(request, {
+        [](std::vector<listenfree::domain::Track>) {},
+        [&](listenfree::application::ScanOutcome outcome) {
+            ++terminalCalls;
+            status = outcome.status;
+        }
+    });
+
+    scanner.cancel(id + 1);
+    QCOMPARE(terminalCalls, 0);
+    scanner.cancel(id);
+    QCOMPARE(terminalCalls, 1);
+    QCOMPARE(status, listenfree::application::ScanStatus::Cancelled);
+    scanner.cancel(id);
+    QCOMPARE(terminalCalls, 1);
+    QCoreApplication::processEvents();
+    QCOMPARE(terminalCalls, 1);
+}
+
+void BackendTests::libraryScannerAdapterFailureIsTerminal() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile audio(directory.filePath(QStringLiteral("failure.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.close();
+
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<ThrowingMetadataReader>());
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(directory.path().toStdWString());
+    int terminalCalls = 0;
+    std::optional<listenfree::application::ScanOutcome> result;
+    scanner.start(request, {
+        [](std::vector<listenfree::domain::Track>) {},
+        [&](listenfree::application::ScanOutcome outcome) {
+            ++terminalCalls;
+            result = std::move(outcome);
+        }
+    });
+
+    QTRY_VERIFY_WITH_TIMEOUT(result.has_value(), 3000);
+    QCOMPARE(terminalCalls, 1);
+    QCOMPARE(result->status, listenfree::application::ScanStatus::Failed);
+    QCOMPARE(result->error, std::string("metadata-read-failed"));
+}
+
+void BackendTests::libraryScannerAdapterContainsBatchCallbackFailure() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile audio(directory.filePath(QStringLiteral("callback.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.close();
+
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
+    listenfree::application::ScanRequest request;
+    request.roots.emplace_back(directory.path().toStdWString());
+    std::optional<listenfree::application::ScanOutcome> result;
+    scanner.start(request, {
+        [](std::vector<listenfree::domain::Track>) { throw std::runtime_error("batch-callback-failed"); },
+        [&](listenfree::application::ScanOutcome outcome) { result = std::move(outcome); }
+    });
+
+    QTRY_VERIFY_WITH_TIMEOUT(result.has_value(), 3000);
+    QCOMPARE(result->status, listenfree::application::ScanStatus::Failed);
+    QCOMPARE(result->error, std::string("batch-callback-failed"));
+}
+
+void BackendTests::libraryControllerPersistsScanBatches() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile audio(directory.filePath(QStringLiteral("controller-track.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.close();
+
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(directory.filePath(QStringLiteral("controller.sqlite"))));
+    listenfree::infrastructure::database::TrackRepository repository(database);
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
+    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+
+    controller.scan({directory.path()});
+
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(controller.importedCount(), quint64(1));
+    QVERIFY(controller.lastError().isEmpty());
+    const auto stored = repository.search("controller-track");
+    QCOMPARE(stored.size(), std::size_t(1));
+    QCOMPARE(stored.front().title, std::string("controller-track"));
 }
 
 void BackendTests::sourceProtocolRoundTrip() {

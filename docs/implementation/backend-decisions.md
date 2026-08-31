@@ -37,8 +37,8 @@ This log records reversible backend choices made without blocking design work. C
 ## BID-005 — Scan and parse local metadata in bounded background batches
 
 - **Question:** How should directory traversal and TagLib parsing avoid both an all-library path buffer and GUI-thread file I/O?
-- **Choice:** Use one QtConcurrent worker to enumerate and parse serially, publish at most 64 tracks per batch, and let `QFutureWatcher` throttle production to two pending batches. Deliver application callbacks on the scanner object's thread.
+- **Choice:** Use one QtConcurrent worker to enumerate and parse serially, publish at most 64 tracks per batch, and let `QFutureWatcher` throttle production to two pending batches. Deliver application callbacks on the scanner object's thread. The application seam returns a `ScanId`, accepts idempotent cancellation by ID, and reports exactly one Completed/Cancelled/Failed terminal outcome.
 - **Reason:** This removes the full path list, keeps TagLib use single-threaded, bounds large pending payloads to 128 tracks, and preserves QObject/UI thread affinity for consumers.
 - **Resource constraints:** Delivered batch vectors are cleared immediately; cancellation cancels the future and the worker checks cancellation between files. A single filesystem or TagLib call remains cooperatively, not forcibly, cancellable.
 - **Alternatives:** An explicit mutex/condition-variable channel; one worker per file; GUI-thread metadata parsing.
-- **Review later:** Before exposing scan completion/progress in QML, expose scan IDs at the application port and add explicit Completed/Cancelled terminal callbacks; the infrastructure already drops batches from stale internal generations.
+- **Review later:** Add measurable progress only when the UI needs it; retain scan generations, batch size and backpressure as implementation details.

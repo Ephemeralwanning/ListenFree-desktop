@@ -1,14 +1,19 @@
 #pragma once
 
 #include "application/application_facade.h"
+#include "application/ports.h"
 #include "media/qt_audio_player.h"
 #include "qmlbridge/list_models.h"
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 #include <QtGlobal>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace listenfree::qmlbridge {
 
@@ -40,11 +45,37 @@ private:
 class LibraryController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
+    Q_PROPERTY(quint64 importedCount READ importedCount NOTIFY importedCountChanged)
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 public:
-    explicit LibraryController(QObject* parent = nullptr) : QObject(parent) {}
-    [[nodiscard]] bool scanning() const noexcept { return false; }
+    explicit LibraryController(application::ILocalLibraryScanner& scanner,
+                               application::ITrackRepository& repository,
+                               QObject* parent = nullptr);
+    ~LibraryController() override;
+
+    [[nodiscard]] bool scanning() const noexcept { return scanning_; }
+    [[nodiscard]] quint64 importedCount() const noexcept { return importedCount_; }
+    [[nodiscard]] QString lastError() const { return lastError_; }
+
+    Q_INVOKABLE void scan(const QStringList& roots);
+    Q_INVOKABLE void cancel();
 signals:
     void scanningChanged();
+    void importedCountChanged();
+    void lastErrorChanged();
+private:
+    void handleBatch(std::uint64_t generation, std::vector<domain::Track> batch);
+    void handleFinished(std::uint64_t generation, application::ScanOutcome outcome);
+    void finish(std::uint64_t generation, application::ScanOutcome outcome);
+    void setLastError(QString error);
+
+    application::ILocalLibraryScanner& scanner_;
+    application::ITrackRepository& repository_;
+    std::optional<application::ScanId> activeScanId_;
+    std::uint64_t generation_{0};
+    quint64 importedCount_{0};
+    QString lastError_;
+    bool scanning_{false};
 };
 
 class PlayerController final : public QObject {

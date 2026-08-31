@@ -1,5 +1,11 @@
 #include "qmlbridge/controllers.h"
 
+#include <QPointer>
+
+#include <exception>
+#include <filesystem>
+#include <span>
+
 namespace listenfree::qmlbridge {
 
 AppController::AppController(QObject* parent)
@@ -33,6 +39,105 @@ QString AppController::playbackState() const {
 
 void AppController::initialize() { facade_.initializeMock(); }
 void AppController::shutdown() {}
+
+LibraryController::LibraryController(application::ILocalLibraryScanner& scanner,
+                                     application::ITrackRepository& repository,
+                                     QObject* parent)
+    : QObject(parent), scanner_(scanner), repository_(repository) {}
+
+LibraryController::~LibraryController() {
+    ++generation_;
+    const auto activeScanId = activeScanId_;
+    activeScanId_.reset();
+    scanning_ = false;
+    if (activeScanId) scanner_.cancel(*activeScanId);
+}
+
+void LibraryController::scan(const QStringList& roots) {
+    cancel();
+
+    const auto generation = ++generation_;
+    activeScanId_.reset();
+    if (importedCount_ != 0) {
+        importedCount_ = 0;
+        emit importedCountChanged();
+    }
+    setLastError({});
+    scanning_ = true;
+    emit scanningChanged();
+
+    application::ScanRequest request;
+    request.roots.reserve(static_cast<std::size_t>(roots.size()));
+    for (const auto& root : roots) {
+        if (!root.isEmpty()) request.roots.emplace_back(root.toStdWString());
+    }
+
+    QPointer<LibraryController> guard(this);
+    application::ScanCallbacks callbacks;
+    callbacks.onBatch = [guard, generation](std::vector<domain::Track> batch) mutable {
+        if (guard) guard->handleBatch(generation, std::move(batch));
+    };
+    callbacks.onFinished = [guard, generation](application::ScanOutcome outcome) mutable {
+        if (guard) guard->handleFinished(generation, std::move(outcome));
+    };
+
+    try {
+        const auto scanId = scanner_.start(request, std::move(callbacks));
+        if (generation == generation_ && scanning_) {
+            activeScanId_ = scanId;
+        } else {
+            scanner_.cancel(scanId);
+        }
+    } catch (const std::exception& error) {
+        finish(generation, {application::ScanStatus::Failed, error.what()});
+    } catch (...) {
+        finish(generation, {application::ScanStatus::Failed, "library.scan-start-failed"});
+    }
+}
+
+void LibraryController::cancel() {
+    if (!scanning_) return;
+    const auto generation = generation_;
+    const auto activeScanId = activeScanId_;
+    finish(generation, {application::ScanStatus::Cancelled, {}});
+    if (activeScanId) scanner_.cancel(*activeScanId);
+}
+
+void LibraryController::handleBatch(std::uint64_t generation, std::vector<domain::Track> batch) {
+    if (generation != generation_ || !scanning_ || batch.empty()) return;
+
+    if (!repository_.upsert(std::span<const domain::Track>(batch))) {
+        const auto activeScanId = activeScanId_;
+        finish(generation, {application::ScanStatus::Failed, "library.repository-upsert-failed"});
+        if (activeScanId) scanner_.cancel(*activeScanId);
+        return;
+    }
+
+    importedCount_ += static_cast<quint64>(batch.size());
+    emit importedCountChanged();
+}
+
+void LibraryController::handleFinished(std::uint64_t generation, application::ScanOutcome outcome) {
+    finish(generation, std::move(outcome));
+}
+
+void LibraryController::finish(std::uint64_t generation, application::ScanOutcome outcome) {
+    if (generation != generation_ || !scanning_) return;
+
+    activeScanId_.reset();
+    if (outcome.status == application::ScanStatus::Failed) {
+        setLastError(outcome.error.empty() ? QStringLiteral("library.scan-failed")
+                                           : QString::fromStdString(outcome.error));
+    }
+    scanning_ = false;
+    emit scanningChanged();
+}
+
+void LibraryController::setLastError(QString error) {
+    if (lastError_ == error) return;
+    lastError_ = std::move(error);
+    emit lastErrorChanged();
+}
 
 PlayerController::PlayerController(QObject* parent)
     : QObject(parent), player_(std::make_unique<media::QtAudioPlayer>()) {

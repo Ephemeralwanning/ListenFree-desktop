@@ -9,6 +9,7 @@
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
 
+#include <exception>
 #include <system_error>
 
 namespace listenfree::infrastructure::library {
@@ -29,11 +30,7 @@ LibraryScanner::LibraryScanner(QObject* parent) : QObject(parent) {
         batch->tracks.squeeze();
     });
     connect(&watcher_, &QFutureWatcher<ScanBatchPtr>::finished, this, [this] {
-        if (cancelled_ && cancelled_->load()) {
-            emit finished();
-            return;
-        }
-        emit finished();
+        emit finished(cancelled_ && cancelled_->load());
     });
 }
 
@@ -165,39 +162,68 @@ LocalLibraryScannerAdapter::LocalLibraryScannerAdapter(
     : QObject(parent), scanner_(this), metadataReader_(std::move(metadataReader)) {
     if (!metadataReader_) metadataReader_ = std::make_unique<TagLibMetadataReader>();
     connect(&scanner_, &LibraryScanner::tracksFound, this, [this](QVector<domain::Track> tracks) {
-        for (auto& track : tracks) {
-            if (cancelled_ && cancelled_()) {
-                scanner_.cancel();
-                break;
-            }
-            if (onTrack_) onTrack_(std::move(track));
+        if (!activeScanId_ || !callbacks_.onBatch) return;
+        std::vector<domain::Track> batch;
+        batch.reserve(static_cast<std::size_t>(tracks.size()));
+        for (auto& track : tracks) batch.push_back(std::move(track));
+        try {
+            callbacks_.onBatch(std::move(batch));
+        } catch (const std::exception& exception) {
+            failure_ = exception.what();
+            scanner_.cancel();
+        } catch (...) {
+            failure_ = "library.scan-batch-callback-failed";
+            scanner_.cancel();
         }
     });
     connect(&scanner_, &LibraryScanner::failed, this, [this](const QString& message) {
-        if (onError_) onError_(message.toStdString());
+        if (activeScanId_) failure_ = message.toStdString();
+    });
+    connect(&scanner_, &LibraryScanner::finished, this, [this](bool cancelled) {
+        if (!activeScanId_) return;
+        if (!failure_.empty()) {
+            finish({application::ScanStatus::Failed, std::move(failure_)});
+        } else {
+            finish({cancelled ? application::ScanStatus::Cancelled : application::ScanStatus::Completed, {}});
+        }
     });
 }
 
-LocalLibraryScannerAdapter::~LocalLibraryScannerAdapter() { cancel(); }
+LocalLibraryScannerAdapter::~LocalLibraryScannerAdapter() {
+    if (activeScanId_) cancel(*activeScanId_);
+}
 
-void LocalLibraryScannerAdapter::start(const application::ScanRequest& request,
-                                       std::function<void(domain::Track)> onTrack,
-                                       std::function<void(std::string)> onError,
-                                       application::CancelCallback cancelled) {
-    cancel();
+application::ScanId LocalLibraryScannerAdapter::start(const application::ScanRequest& request,
+                                                      application::ScanCallbacks callbacks) {
+    if (activeScanId_) cancel(*activeScanId_);
+    const auto id = nextScanId_++;
+    activeScanId_ = id;
+    callbacks_ = std::move(callbacks);
+    failure_.clear();
     QStringList roots;
     for (const auto& root : request.roots) roots.push_back(QString::fromStdWString(root.wstring()));
     scanner_.start(roots, metadataReader_, request.recursive);
-    onTrack_ = std::move(onTrack);
-    onError_ = std::move(onError);
-    cancelled_ = std::move(cancelled);
+    return id;
 }
 
-void LocalLibraryScannerAdapter::cancel() {
+void LocalLibraryScannerAdapter::cancel(application::ScanId id) noexcept {
+    if (!activeScanId_ || *activeScanId_ != id) return;
     scanner_.cancel();
-    onTrack_ = {};
-    onError_ = {};
-    cancelled_ = {};
+    finish({application::ScanStatus::Cancelled, {}});
+}
+
+void LocalLibraryScannerAdapter::finish(application::ScanOutcome outcome) {
+    auto callback = std::move(callbacks_.onFinished);
+    callbacks_ = {};
+    activeScanId_.reset();
+    failure_.clear();
+    if (!callback) return;
+    try {
+        callback(std::move(outcome));
+    } catch (...) {
+        // Terminal callbacks are isolated so cancel() remains noexcept and
+        // scanner teardown cannot be interrupted by caller code.
+    }
 }
 
 } // namespace listenfree::infrastructure::library

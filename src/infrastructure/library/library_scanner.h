@@ -32,7 +32,7 @@ public:
 
 signals:
     void tracksFound(QVector<domain::Track> tracks);
-    void finished();
+    void finished(bool cancelled);
     void failed(const QString& message);
 
 private:
@@ -61,16 +61,19 @@ public:
                                         QObject* parent = nullptr);
     ~LocalLibraryScannerAdapter() override;
 
-    void start(const application::ScanRequest& request, std::function<void(domain::Track)> onTrack,
-               std::function<void(std::string)> onError, application::CancelCallback cancelled) override;
-    void cancel() override;
+    application::ScanId start(const application::ScanRequest& request,
+                              application::ScanCallbacks callbacks) override;
+    void cancel(application::ScanId id) noexcept override;
 
 private:
+    void finish(application::ScanOutcome outcome);
+
     LibraryScanner scanner_;
     std::shared_ptr<application::IMetadataReader> metadataReader_;
-    std::function<void(domain::Track)> onTrack_;
-    std::function<void(std::string)> onError_;
-    application::CancelCallback cancelled_;
+    application::ScanCallbacks callbacks_;
+    application::ScanId nextScanId_{1};
+    std::optional<application::ScanId> activeScanId_;
+    std::string failure_;
 };
 
 } // namespace listenfree::infrastructure::library
