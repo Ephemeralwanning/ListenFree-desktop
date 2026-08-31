@@ -23,7 +23,8 @@ enum class PlaybackCapability : std::uint32_t {
     Equalizer = 1U << 6U,
     Gapless = 1U << 7U,
     Crossfade = 1U << 8U,
-    ReplayGain = 1U << 9U
+    ReplayGain = 1U << 9U,
+    HighResolution = 1U << 10U
 };
 
 constexpr std::uint32_t capabilityMask(PlaybackCapability capability) noexcept {
@@ -47,6 +48,38 @@ struct ScanOutcome {
 struct ScanCallbacks {
     std::function<void(std::vector<domain::Track>)> onBatch;
     std::function<void(ScanOutcome)> onFinished;
+};
+
+struct PlaybackEvents {
+    // Callbacks run serially on the player's owner thread and may call player
+    // methods. Replacing the set prevents further old callbacks from starting;
+    // a callback already on the stack owns a safe local snapshot until it returns.
+    std::function<void(domain::PlaybackState)> onStateChanged;
+    std::function<void(std::chrono::milliseconds)> onPositionChanged;
+    std::function<void(std::chrono::milliseconds)> onDurationChanged;
+    std::function<void(bool)> onSeekableChanged;
+    std::function<void(float)> onVolumeChanged;
+    std::function<void(bool)> onMutedChanged;
+    std::function<void()> onFinished;
+    std::function<void(std::optional<domain::PlaybackError>)> onErrorChanged;
+    std::function<void(std::optional<domain::AudioFormatInfo>)> onAudioFormatChanged;
+};
+
+struct PlaybackBackendEvents {
+    std::function<void(std::uint32_t)> onCapabilitiesChanged;
+};
+
+struct AudioDeviceInfo {
+    std::string id;
+    std::string name;
+    bool isDefault{false};
+    bool isSelected{false};
+};
+
+struct AudioDeviceEvents {
+    // Same owner-thread, replaceable-subscription contract as PlaybackEvents.
+    std::function<void()> onDevicesChanged;
+    std::function<void(std::string)> onSelectedDeviceChanged;
 };
 
 class ITrackRepository {
@@ -95,24 +128,41 @@ class IAudioPlayer {
 public:
     virtual ~IAudioPlayer() = default;
     virtual void open(const domain::PlaybackItem&) = 0;
+    virtual void clear() = 0;
     virtual void play() = 0;
     virtual void pause() = 0;
     virtual void stop() = 0;
     virtual void seek(std::chrono::milliseconds) = 0;
     virtual void setVolume(float normalized) = 0;
+    [[nodiscard]] virtual float volume() const noexcept = 0;
+    virtual void setMuted(bool muted) = 0;
+    [[nodiscard]] virtual bool muted() const noexcept = 0;
+    [[nodiscard]] virtual domain::PlaybackState state() const noexcept = 0;
+    [[nodiscard]] virtual std::chrono::milliseconds position() const noexcept = 0;
+    [[nodiscard]] virtual std::chrono::milliseconds duration() const noexcept = 0;
+    [[nodiscard]] virtual bool seekable() const noexcept = 0;
+    [[nodiscard]] virtual std::optional<domain::PlaybackError> lastError() const = 0;
+    [[nodiscard]] virtual std::optional<domain::AudioFormatInfo> audioFormat() const = 0;
+    virtual void setEvents(PlaybackEvents events) = 0;
 };
 
 class IPlaybackBackend {
 public:
     virtual ~IPlaybackBackend() = default;
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    [[nodiscard]] virtual bool available() const noexcept = 0;
     virtual std::uint32_t capabilities() const noexcept = 0;
+    virtual void setBackendEvents(PlaybackBackendEvents events) = 0;
 };
 
 class IAudioDeviceService {
 public:
     virtual ~IAudioDeviceService() = default;
-    virtual std::vector<std::string> deviceIds() const = 0;
+    [[nodiscard]] virtual std::vector<AudioDeviceInfo> devices() const = 0;
+    [[nodiscard]] virtual std::string selectedDeviceId() const = 0;
     virtual bool select(std::string_view id) = 0;
+    virtual void refresh() = 0;
+    virtual void setDeviceEvents(AudioDeviceEvents events) = 0;
 };
 
 class IEqualizerService {

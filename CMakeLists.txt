@@ -21,6 +21,8 @@ target_compile_features(listenfree_domain INTERFACE cxx_std_20)
 
 add_library(listenfree_application STATIC
     src/application/ports.h
+    src/application/playback_service.h
+    src/application/playback_service.cpp
     src/application/application_facade.h
     src/application/application_facade.cpp
 )
@@ -49,7 +51,7 @@ add_library(listenfree_media STATIC
     src/media/qt_audio_player.h
     src/media/qt_audio_player.cpp
 )
-target_link_libraries(listenfree_media PUBLIC listenfree_domain Qt6::Core Qt6::Multimedia)
+target_link_libraries(listenfree_media PUBLIC listenfree_domain Qt6::Core PRIVATE Qt6::Multimedia)
 target_include_directories(listenfree_media PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(listenfree_source_protocol STATIC
@@ -82,7 +84,10 @@ add_library(listenfree_qmlbridge STATIC
     src/qmlbridge/controllers.h
     src/qmlbridge/controllers.cpp
 )
-target_link_libraries(listenfree_qmlbridge PUBLIC listenfree_application listenfree_database listenfree_library listenfree_media listenfree_online Qt6::Core Qt6::Qml)
+target_link_libraries(listenfree_qmlbridge
+    PUBLIC listenfree_application listenfree_database listenfree_library listenfree_online Qt6::Core Qt6::Qml
+    PRIVATE listenfree_media
+)
 target_include_directories(listenfree_qmlbridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 qt_add_executable(listenfree WIN32 src/app/main.cpp)
@@ -98,7 +103,16 @@ if(LISTENFREE_BUILD_TESTS)
     add_executable(listenfree_tests tests/backend_tests.cpp)
     target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client TagLib::tag Qt6::Test Qt6::Sql)
     target_include_directories(listenfree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    add_test(NAME listenfree_tests COMMAND listenfree_tests -platform offscreen)
+    add_test(NAME listenfree_tests COMMAND listenfree_tests)
+    add_executable(listenfree_playback_tests tests/playback_tests.cpp)
+    target_link_libraries(listenfree_playback_tests PRIVATE listenfree_media listenfree_application Qt6::Test Qt6::Network Qt6::Multimedia)
+    target_include_directories(listenfree_playback_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME listenfree_playback_tests COMMAND listenfree_playback_tests)
+    set_tests_properties(listenfree_playback_tests PROPERTIES TIMEOUT 240)
+    add_executable(listenfree_playback_service_tests tests/playback_service_tests.cpp)
+    target_link_libraries(listenfree_playback_service_tests PRIVATE listenfree_qmlbridge Qt6::Test)
+    target_include_directories(listenfree_playback_service_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME listenfree_playback_service_tests COMMAND listenfree_playback_service_tests)
     add_test(NAME listenfree_smoke COMMAND listenfree --smoke -platform offscreen)
     set_tests_properties(listenfree_smoke PROPERTIES TIMEOUT 10)
 endif()

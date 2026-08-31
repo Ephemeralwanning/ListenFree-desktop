@@ -1,10 +1,14 @@
 #include "qmlbridge/controllers.h"
 
+#include "application/playback_service.h"
+#include "media/qt_audio_player.h"
+
 #include <QPointer>
 
 #include <exception>
 #include <filesystem>
 #include <span>
+#include <stdexcept>
 
 namespace listenfree::qmlbridge {
 
@@ -139,33 +143,210 @@ void LibraryController::setLastError(QString error) {
     emit lastErrorChanged();
 }
 
-PlayerController::PlayerController(QObject* parent)
-    : QObject(parent), player_(std::make_unique<media::QtAudioPlayer>()) {
-    connect(player_.get(), &media::QtAudioPlayer::stateChanged, this, &PlayerController::stateChanged);
-    connect(player_.get(), &media::QtAudioPlayer::positionChanged, this, &PlayerController::positionChanged);
-    connect(player_.get(), &media::QtAudioPlayer::durationChanged, this, &PlayerController::durationChanged);
-    connect(player_.get(), &media::QtAudioPlayer::errorChanged, this, &PlayerController::errorChanged);
+class PlayerController::Impl final {
+public:
+    explicit Impl(std::unique_ptr<application::IAudioPlayer> ownedPlayer)
+        : playerOwner(std::move(ownedPlayer)), player(requirePlayer(playerOwner)),
+          backend(dynamic_cast<application::IPlaybackBackend*>(playerOwner.get())),
+          devices(dynamic_cast<application::IAudioDeviceService*>(playerOwner.get())),
+          playback(player) {}
+
+    static application::IAudioPlayer& requirePlayer(
+        const std::unique_ptr<application::IAudioPlayer>& candidate) {
+        if (!candidate) throw std::invalid_argument("PlayerController requires an audio player");
+        return *candidate;
+    }
+
+    std::unique_ptr<application::IAudioPlayer> playerOwner;
+    application::IAudioPlayer& player;
+    application::IPlaybackBackend* backend;
+    application::IAudioDeviceService* devices;
+    application::PlaybackService playback{player};
+};
+
+namespace {
+
+QString playbackStateName(domain::PlaybackState state) {
+    switch (state) {
+    case domain::PlaybackState::Idle: return QStringLiteral("Idle");
+    case domain::PlaybackState::Loading: return QStringLiteral("Loading");
+    case domain::PlaybackState::Playing: return QStringLiteral("Playing");
+    case domain::PlaybackState::Paused: return QStringLiteral("Paused");
+    case domain::PlaybackState::Stopped: return QStringLiteral("Stopped");
+    case domain::PlaybackState::Buffering: return QStringLiteral("Buffering");
+    case domain::PlaybackState::Error: return QStringLiteral("Error");
+    }
+    return QStringLiteral("Error");
 }
 
-QString PlayerController::state() const { return player_->stateName(); }
-qint64 PlayerController::position() const noexcept { return player_->position(); }
-qint64 PlayerController::duration() const noexcept { return player_->duration(); }
+} // namespace
+
+PlayerController::PlayerController(QObject* parent)
+    : PlayerController(std::make_unique<media::QtAudioPlayer>(), parent) {}
+
+PlayerController::PlayerController(std::unique_ptr<application::IAudioPlayer> player, QObject* parent)
+    : QObject(parent), queueModel_(std::make_unique<QueueModel>()),
+      impl_(std::make_unique<Impl>(std::move(player))) {
+    application::PlaybackServiceEvents events;
+    events.onStateChanged = [this] { emit stateChanged(); };
+    events.onPositionChanged = [this] { emit positionChanged(); };
+    events.onDurationChanged = [this] { emit durationChanged(); };
+    events.onSeekableChanged = [this] { emit seekableChanged(); };
+    events.onVolumeChanged = [this] { emit volumeChanged(); };
+    events.onMutedChanged = [this] { emit mutedChanged(); };
+    events.onErrorChanged = [this] { emit errorChanged(); };
+    events.onAudioFormatChanged = [this] { emit audioFormatChanged(); };
+    events.onQueueChanged = [this] { syncQueueModel(); };
+    events.onCurrentItemChanged = [this] { emit currentTrackChanged(); };
+    events.onLyricsChanged = [this] { emit lyricsChanged(); };
+    events.onCurrentLyricChanged = [this] { emit currentLyricChanged(); };
+    impl_->playback.setEvents(std::move(events));
+
+    application::PlaybackBackendEvents backendEvents;
+    backendEvents.onCapabilitiesChanged = [this](std::uint32_t) { emit capabilitiesChanged(); };
+    if (impl_->backend) impl_->backend->setBackendEvents(std::move(backendEvents));
+    application::AudioDeviceEvents deviceEvents;
+    deviceEvents.onDevicesChanged = [this] { emit devicesChanged(); };
+    deviceEvents.onSelectedDeviceChanged = [this](std::string) { emit devicesChanged(); };
+    if (impl_->devices) impl_->devices->setDeviceEvents(std::move(deviceEvents));
+}
+
+PlayerController::~PlayerController() {
+    if (impl_->backend) impl_->backend->setBackendEvents({});
+    if (impl_->devices) impl_->devices->setDeviceEvents({});
+}
+
+QString PlayerController::state() const { return playbackStateName(impl_->player.state()); }
+qint64 PlayerController::position() const noexcept { return impl_->player.position().count(); }
+qint64 PlayerController::duration() const noexcept { return impl_->player.duration().count(); }
+bool PlayerController::seekable() const noexcept { return impl_->player.seekable(); }
+float PlayerController::volume() const noexcept { return impl_->player.volume(); }
+bool PlayerController::muted() const noexcept { return impl_->player.muted(); }
+quint32 PlayerController::capabilities() const noexcept {
+    return impl_->backend ? impl_->backend->capabilities() : 0U;
+}
+QStringList PlayerController::deviceIds() const {
+    QStringList result;
+    if (!impl_->devices) return result;
+    for (const auto& device : impl_->devices->devices()) {
+        result.push_back(QString::fromStdString(device.id));
+    }
+    return result;
+}
+
+QString PlayerController::errorCode() const {
+    const auto error = impl_->player.lastError();
+    if (!error) return {};
+    switch (error->code) {
+    case domain::PlaybackErrorCode::InvalidTransition: return QStringLiteral("invalid-transition");
+    case domain::PlaybackErrorCode::OpenFailed: return QStringLiteral("open-failed");
+    case domain::PlaybackErrorCode::Network: return QStringLiteral("network");
+    case domain::PlaybackErrorCode::Unsupported: return QStringLiteral("unsupported");
+    case domain::PlaybackErrorCode::Internal: return QStringLiteral("internal");
+    }
+    return QStringLiteral("internal");
+}
+
+QString PlayerController::errorMessage() const {
+    const auto error = impl_->player.lastError();
+    return error ? QString::fromStdString(error->message) : QString{};
+}
+
+bool PlayerController::errorRetryable() const {
+    const auto error = impl_->player.lastError();
+    return error && error->retryable;
+}
+
+QString PlayerController::audioCodec() const {
+    const auto format = impl_->player.audioFormat();
+    return format ? QString::fromStdString(format->codec) : QString{};
+}
+
+int PlayerController::sampleRate() const {
+    const auto format = impl_->player.audioFormat();
+    return format ? format->sampleRate : 0;
+}
+
+int PlayerController::channelCount() const {
+    const auto format = impl_->player.audioFormat();
+    return format ? format->channels : 0;
+}
+
+QString PlayerController::currentTrackId() const {
+    const auto* item = impl_->playback.currentItem();
+    return item ? QString::fromStdString(item->track.id.value()) : QString{};
+}
+
+int PlayerController::currentLyricIndex() const noexcept {
+    const auto index = impl_->playback.currentLyricIndex();
+    return index ? static_cast<int>(*index) : -1;
+}
+
+QString PlayerController::currentLyricText() const {
+    const auto line = impl_->playback.currentLyricLine();
+    return line ? QString::fromStdString(line->text) : QString{};
+}
+
+int PlayerController::lyricLineCount() const noexcept {
+    return static_cast<int>(impl_->playback.lyrics().size());
+}
 
 void PlayerController::openLocal(const QString& path) {
     if (path.isEmpty()) {
-        player_->open(domain::PlaybackItem{});
+        setQueue({});
         return;
     }
     domain::PlaybackItem item;
     item.track.localPath = path.toStdString();
-    player_->open(item);
+    setQueue({item});
+    impl_->player.open(item);
 }
 
-void PlayerController::openUrl(const QUrl& url) { player_->open(url); }
-void PlayerController::play() { player_->play(); }
-void PlayerController::pause() { player_->pause(); }
-void PlayerController::stop() { player_->stop(); }
-void PlayerController::seek(qint64 position) { player_->seek(position); }
-void PlayerController::setVolume(float volume) { player_->setVolume(volume); }
+void PlayerController::openUrl(const QUrl& url) {
+    if (url.isEmpty()) {
+        setQueue({});
+        return;
+    }
+    domain::PlaybackItem item;
+    item.resolvedUrl = url.toString().toStdString();
+    setQueue({item});
+    impl_->player.open(item);
+}
+
+void PlayerController::play() {
+    if (impl_->player.state() == domain::PlaybackState::Idle && impl_->playback.currentItem()) {
+        impl_->playback.playCurrent();
+    } else {
+        impl_->player.play();
+    }
+}
+void PlayerController::pause() { impl_->player.pause(); }
+void PlayerController::stop() { impl_->player.stop(); }
+void PlayerController::seek(qint64 position) {
+    impl_->player.seek(std::chrono::milliseconds(position));
+}
+void PlayerController::setVolume(float volume) { impl_->player.setVolume(volume); }
+void PlayerController::setMuted(bool muted) { impl_->player.setMuted(muted); }
+bool PlayerController::selectDevice(const QString& id) {
+    return impl_->devices && impl_->devices->select(id.toStdString());
+}
+
+void PlayerController::setQueue(std::vector<domain::PlaybackItem> items, std::size_t currentIndex) {
+    impl_->playback.setQueue(std::move(items), currentIndex);
+}
+
+void PlayerController::setLyrics(std::vector<domain::LyricLine> lyrics) {
+    impl_->playback.setLyrics(std::move(lyrics));
+}
+
+void PlayerController::syncQueueModel() {
+    std::vector<domain::Track> tracks;
+    tracks.reserve(impl_->playback.queue().items().size());
+    for (const auto& item : impl_->playback.queue().items()) tracks.push_back(item.track);
+    queueModel_->setTracks(std::move(tracks));
+    queueModel_->setCurrentIndex(impl_->playback.queue().empty()
+                                     ? -1
+                                     : static_cast<int>(impl_->playback.queue().currentIndex()));
+}
 
 } // namespace listenfree::qmlbridge

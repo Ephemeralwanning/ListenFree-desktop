@@ -48,9 +48,12 @@ class BackendTests final : public QObject {
     Q_OBJECT
 private slots:
     void queueOperations();
+    void queueRemovalPreservesCurrentItem();
     void playbackStateTransitions();
     void audioPlayerDomainAdapter();
+    void audioPlayerMuteVolumeAndDynamicCapabilities();
     void playerControllerAdapter();
+    void playerControllerProjectsMuteQueueAndLyrics();
     void databaseMigrationAndRepository();
     void databasePortRepositories();
     void metadataReaderMapsRegularFile();
@@ -93,14 +96,54 @@ void BackendTests::queueOperations() {
     QVERIFY(!queue.select(5));
 }
 
+void BackendTests::queueRemovalPreservesCurrentItem() {
+    listenfree::domain::PlaybackQueue queue;
+    for (const auto* id : {"first", "second", "third"}) {
+        listenfree::domain::Track track;
+        track.id = listenfree::domain::TrackId(id);
+        QVERIFY(queue.enqueue({track, std::nullopt}));
+    }
+    QVERIFY(queue.select(1));
+    QVERIFY(queue.remove(0));
+    QCOMPARE(queue.currentIndex(), std::size_t(0));
+    QCOMPARE(queue.items()[queue.currentIndex()].track.id.value(), std::string("second"));
+}
+
 void BackendTests::playbackStateTransitions() {
-    listenfree::media::PlaybackStateMachine machine;
-    QCOMPARE(machine.state(), listenfree::domain::PlaybackState::Idle);
-    QVERIFY(machine.transition(listenfree::domain::PlaybackState::Loading));
-    QVERIFY(machine.transition(listenfree::domain::PlaybackState::Playing));
-    QVERIFY(machine.transition(listenfree::domain::PlaybackState::Paused));
-    QVERIFY(!machine.transition(listenfree::domain::PlaybackState::Buffering));
-    QVERIFY(machine.transition(listenfree::domain::PlaybackState::Stopped));
+    using listenfree::media::BackendMediaStatus;
+    using listenfree::media::BackendPlaybackState;
+    using listenfree::media::PlaybackObservation;
+    using listenfree::media::reducePlaybackState;
+
+    QCOMPARE(reducePlaybackState({}).state, listenfree::domain::PlaybackState::Idle);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Loading,
+                                  BackendPlaybackState::Stopped, true, false, false}).state,
+             listenfree::domain::PlaybackState::Loading);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Buffering,
+                                  BackendPlaybackState::Stopped, true, false, false}).state,
+             listenfree::domain::PlaybackState::Buffering);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Stalled,
+                                  BackendPlaybackState::Stopped, true, false, false, true}).state,
+             listenfree::domain::PlaybackState::Buffering);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Loaded,
+                                  BackendPlaybackState::Stopped, true, false, false, true}).state,
+             listenfree::domain::PlaybackState::Loading);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Buffered,
+                                  BackendPlaybackState::Playing, true, false, false}).state,
+             listenfree::domain::PlaybackState::Playing);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Loaded,
+                                  BackendPlaybackState::Paused, true, false, false}).state,
+             listenfree::domain::PlaybackState::Paused);
+    const auto ended = reducePlaybackState({BackendMediaStatus::EndOfMedia,
+                                            BackendPlaybackState::Stopped, true, false, false});
+    QCOMPARE(ended.state, listenfree::domain::PlaybackState::Stopped);
+    QVERIFY(ended.finished);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Invalid,
+                                  BackendPlaybackState::Stopped, true, true, false}).state,
+             listenfree::domain::PlaybackState::Error);
+    QCOMPARE(reducePlaybackState({BackendMediaStatus::Buffering,
+                                  BackendPlaybackState::Stopped, true, false, true}).state,
+             listenfree::domain::PlaybackState::Stopped);
 }
 
 void BackendTests::audioPlayerDomainAdapter() {
@@ -108,8 +151,9 @@ void BackendTests::audioPlayerDomainAdapter() {
     const auto capabilities = player.capabilities();
     QVERIFY(capabilities & listenfree::application::capabilityMask(
                                listenfree::application::PlaybackCapability::LocalFile));
-    QVERIFY(capabilities & listenfree::application::capabilityMask(
-                               listenfree::application::PlaybackCapability::DeviceSelection));
+    QCOMPARE((capabilities & listenfree::application::capabilityMask(
+                                  listenfree::application::PlaybackCapability::DeviceSelection)) != 0,
+             !player.deviceIds().empty());
     QVERIFY(!(capabilities & listenfree::application::capabilityMask(
                                 listenfree::application::PlaybackCapability::Equalizer)));
     QVERIFY(!player.supported());
@@ -120,6 +164,27 @@ void BackendTests::audioPlayerDomainAdapter() {
     QCOMPARE(player.state(), listenfree::domain::PlaybackState::Idle);
 }
 
+void BackendTests::audioPlayerMuteVolumeAndDynamicCapabilities() {
+    listenfree::media::QtAudioPlayer player;
+    listenfree::application::IAudioPlayer& audioPlayer = player;
+
+    audioPlayer.setVolume(-1.0F);
+    QCOMPARE(audioPlayer.volume(), 0.0F);
+    audioPlayer.setVolume(2.0F);
+    QCOMPARE(audioPlayer.volume(), 1.0F);
+
+    audioPlayer.setMuted(true);
+    QVERIFY(audioPlayer.muted());
+    audioPlayer.setMuted(false);
+    QVERIFY(!audioPlayer.muted());
+
+    const bool hasDevices = !player.deviceIds().empty();
+    const bool reportsDeviceSelection =
+        (player.capabilities() & listenfree::application::capabilityMask(
+                                     listenfree::application::PlaybackCapability::DeviceSelection)) != 0;
+    QCOMPARE(reportsDeviceSelection, hasDevices);
+}
+
 void BackendTests::playerControllerAdapter() {
     listenfree::qmlbridge::PlayerController controller;
     QCOMPARE(controller.state(), QStringLiteral("Idle"));
@@ -127,6 +192,29 @@ void BackendTests::playerControllerAdapter() {
     QCOMPARE(controller.state(), QStringLiteral("Idle"));
     controller.setVolume(2.0F);
     controller.seek(0);
+}
+
+void BackendTests::playerControllerProjectsMuteQueueAndLyrics() {
+    listenfree::qmlbridge::PlayerController controller;
+    controller.setMuted(true);
+    QVERIFY(controller.muted());
+    controller.setMuted(false);
+    QVERIFY(!controller.muted());
+
+    listenfree::domain::PlaybackItem first;
+    first.track.id = listenfree::domain::TrackId("queue-first");
+    first.track.title = "Queue First";
+    listenfree::domain::PlaybackItem second;
+    second.track.id = listenfree::domain::TrackId("queue-second");
+    second.track.title = "Queue Second";
+    controller.setQueue({first, second}, 1);
+    QCOMPARE(controller.queueModel()->rowCount(), 2);
+    QCOMPARE(controller.queueModel()->currentIndex(), 1);
+    QCOMPARE(controller.currentTrackId(), QStringLiteral("queue-second"));
+
+    controller.setLyrics({{std::chrono::milliseconds(0), std::chrono::milliseconds(1'000),
+                           "first lyric"}});
+    QCOMPARE(controller.lyricLineCount(), 1);
 }
 
 void BackendTests::databaseMigrationAndRepository() {

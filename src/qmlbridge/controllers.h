@@ -2,7 +2,6 @@
 
 #include "application/application_facade.h"
 #include "application/ports.h"
-#include "media/qt_audio_player.h"
 #include "qmlbridge/list_models.h"
 
 #include <QObject>
@@ -83,11 +82,46 @@ class PlayerController final : public QObject {
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(qint64 position READ position NOTIFY positionChanged)
     Q_PROPERTY(qint64 duration READ duration NOTIFY durationChanged)
+    Q_PROPERTY(bool seekable READ seekable NOTIFY seekableChanged)
+    Q_PROPERTY(float volume READ volume WRITE setVolume NOTIFY volumeChanged)
+    Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
+    Q_PROPERTY(quint32 capabilities READ capabilities NOTIFY capabilitiesChanged)
+    Q_PROPERTY(QStringList deviceIds READ deviceIds NOTIFY devicesChanged)
+    Q_PROPERTY(QString errorCode READ errorCode NOTIFY errorChanged)
+    Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorChanged)
+    Q_PROPERTY(bool errorRetryable READ errorRetryable NOTIFY errorChanged)
+    Q_PROPERTY(QString audioCodec READ audioCodec NOTIFY audioFormatChanged)
+    Q_PROPERTY(int sampleRate READ sampleRate NOTIFY audioFormatChanged)
+    Q_PROPERTY(int channelCount READ channelCount NOTIFY audioFormatChanged)
+    Q_PROPERTY(QueueModel* queueModel READ queueModel CONSTANT)
+    Q_PROPERTY(QString currentTrackId READ currentTrackId NOTIFY currentTrackChanged)
+    Q_PROPERTY(int currentLyricIndex READ currentLyricIndex NOTIFY currentLyricChanged)
+    Q_PROPERTY(QString currentLyricText READ currentLyricText NOTIFY currentLyricChanged)
+    Q_PROPERTY(int lyricLineCount READ lyricLineCount NOTIFY lyricsChanged)
 public:
     explicit PlayerController(QObject* parent = nullptr);
+    explicit PlayerController(std::unique_ptr<application::IAudioPlayer> player,
+                              QObject* parent = nullptr);
+    ~PlayerController() override;
     [[nodiscard]] QString state() const;
     [[nodiscard]] qint64 position() const noexcept;
     [[nodiscard]] qint64 duration() const noexcept;
+    [[nodiscard]] bool seekable() const noexcept;
+    [[nodiscard]] float volume() const noexcept;
+    [[nodiscard]] bool muted() const noexcept;
+    [[nodiscard]] quint32 capabilities() const noexcept;
+    [[nodiscard]] QStringList deviceIds() const;
+    [[nodiscard]] QString errorCode() const;
+    [[nodiscard]] QString errorMessage() const;
+    [[nodiscard]] bool errorRetryable() const;
+    [[nodiscard]] QString audioCodec() const;
+    [[nodiscard]] int sampleRate() const;
+    [[nodiscard]] int channelCount() const;
+    [[nodiscard]] QueueModel* queueModel() const noexcept { return queueModel_.get(); }
+    [[nodiscard]] QString currentTrackId() const;
+    [[nodiscard]] int currentLyricIndex() const noexcept;
+    [[nodiscard]] QString currentLyricText() const;
+    [[nodiscard]] int lyricLineCount() const noexcept;
     Q_INVOKABLE void openLocal(const QString& path);
     Q_INVOKABLE void openUrl(const QUrl& url);
     Q_INVOKABLE void play();
@@ -95,13 +129,29 @@ public:
     Q_INVOKABLE void stop();
     Q_INVOKABLE void seek(qint64 position);
     Q_INVOKABLE void setVolume(float volume);
+    Q_INVOKABLE void setMuted(bool muted);
+    Q_INVOKABLE bool selectDevice(const QString& id);
+    void setQueue(std::vector<domain::PlaybackItem> items, std::size_t currentIndex = 0);
+    void setLyrics(std::vector<domain::LyricLine> lyrics);
 signals:
     void stateChanged();
     void positionChanged();
     void durationChanged();
-    void errorChanged(const QString& message);
+    void seekableChanged();
+    void volumeChanged();
+    void mutedChanged();
+    void capabilitiesChanged();
+    void devicesChanged();
+    void errorChanged();
+    void audioFormatChanged();
+    void currentTrackChanged();
+    void currentLyricChanged();
+    void lyricsChanged();
 private:
-    std::unique_ptr<media::QtAudioPlayer> player_;
+    class Impl;
+    std::unique_ptr<QueueModel> queueModel_;
+    std::unique_ptr<Impl> impl_;
+    void syncQueueModel();
 };
 
 class PlaylistController final : public QObject {

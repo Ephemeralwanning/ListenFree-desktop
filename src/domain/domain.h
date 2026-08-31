@@ -74,6 +74,7 @@ struct PlaybackError {
     PlaybackErrorCode code{PlaybackErrorCode::Internal};
     std::string message;
     bool retryable{false};
+    friend bool operator==(const PlaybackError&, const PlaybackError&) = default;
 };
 
 struct AudioFormatInfo {
@@ -81,6 +82,7 @@ struct AudioFormatInfo {
     std::int32_t sampleRate{0};
     std::int32_t channels{0};
     std::int32_t bitrate{0};
+    friend bool operator==(const AudioFormatInfo&, const AudioFormatInfo&) = default;
 };
 
 struct LyricLine {
@@ -113,8 +115,10 @@ public:
     }
     bool remove(std::size_t index) {
         if (index >= items_.size()) return false;
+        const bool beforeCurrent = index < currentIndex_;
         items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(index));
         if (items_.empty()) currentIndex_ = 0;
+        else if (beforeCurrent) --currentIndex_;
         else if (currentIndex_ >= items_.size()) currentIndex_ = items_.size() - 1;
         return true;
     }

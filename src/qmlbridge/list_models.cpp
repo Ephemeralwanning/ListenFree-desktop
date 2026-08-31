@@ -33,6 +33,13 @@ QHash<int, QByteArray> TrackListModel::roleNames() const {
     return {{TrackIdRole, "trackId"}, {TitleRole, "title"}, {ArtistRole, "artist"}, {DurationRole, "duration"}};
 }
 
+void QueueModel::setCurrentIndex(int index) {
+    const int bounded = index >= 0 && index < rowCount() ? index : -1;
+    if (currentIndex_ == bounded) return;
+    currentIndex_ = bounded;
+    emit currentIndexChanged();
+}
+
 PlaylistListModel::PlaylistListModel(QObject* parent) : QAbstractListModel(parent) {}
 
 void PlaylistListModel::setPlaylists(std::vector<domain::Playlist> playlists) {

@@ -23,8 +23,15 @@ private:
 
 class QueueModel final : public TrackListModel {
     Q_OBJECT
+    Q_PROPERTY(int currentIndex READ currentIndex NOTIFY currentIndexChanged)
 public:
     using TrackListModel::TrackListModel;
+    [[nodiscard]] int currentIndex() const noexcept { return currentIndex_; }
+    void setCurrentIndex(int index);
+signals:
+    void currentIndexChanged();
+private:
+    int currentIndex_{-1};
 };
 
 class PlaylistListModel final : public QAbstractListModel {
