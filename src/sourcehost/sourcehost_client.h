@@ -40,12 +40,14 @@ private:
 
     QString executablePath_;
     QProcess process_;
+    QTimer restartTimer_;
     QByteArray readBuffer_;
     QHash<QString, QPointer<QTimer>> pending_;
     bool stopping_{false};
     bool handshakeComplete_{false};
     bool autoRestart_{true};
     int restartAttempts_{0};
+    static constexpr qsizetype MaxPendingRequests = 256;
 };
 
 } // namespace listenfree::sourcehost

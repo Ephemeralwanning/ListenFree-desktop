@@ -13,6 +13,23 @@
 
 namespace listenfree::application {
 
+enum class PlaybackCapability : std::uint32_t {
+    LocalFile = 1U << 0U,
+    HttpStream = 1U << 1U,
+    Seek = 1U << 2U,
+    Volume = 1U << 3U,
+    Mute = 1U << 4U,
+    DeviceSelection = 1U << 5U,
+    Equalizer = 1U << 6U,
+    Gapless = 1U << 7U,
+    Crossfade = 1U << 8U,
+    ReplayGain = 1U << 9U
+};
+
+constexpr std::uint32_t capabilityMask(PlaybackCapability capability) noexcept {
+    return static_cast<std::uint32_t>(capability);
+}
+
 struct ScanRequest {
     std::vector<std::filesystem::path> roots;
     bool recursive{true};

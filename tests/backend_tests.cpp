@@ -27,12 +27,17 @@ private slots:
     void playerControllerAdapter();
     void databaseMigrationAndRepository();
     void databasePortRepositories();
+    void metadataReaderMapsRegularFile();
+    void metadataReaderAcceptsEmptyRegularFile();
+    void metadataReaderRejectsMissingFile();
     void libraryScannerAdapter();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
     void sourceHostRequestTimeout();
     void sourceHostCrashRecovery();
+    void sourceHostStopPreventsRestart();
+    void sourceHostBoundsPendingRequests();
     void mockProvider();
     void listModels();
     void appControllerMock();
@@ -65,6 +70,14 @@ void BackendTests::playbackStateTransitions() {
 
 void BackendTests::audioPlayerDomainAdapter() {
     listenfree::media::QtAudioPlayer player;
+    const auto capabilities = player.capabilities();
+    QVERIFY(capabilities & listenfree::application::capabilityMask(
+                               listenfree::application::PlaybackCapability::LocalFile));
+    QVERIFY(capabilities & listenfree::application::capabilityMask(
+                               listenfree::application::PlaybackCapability::DeviceSelection));
+    QVERIFY(!(capabilities & listenfree::application::capabilityMask(
+                                listenfree::application::PlaybackCapability::Equalizer)));
+    QVERIFY(!player.supported());
     listenfree::domain::PlaybackItem item;
     item.track.id = listenfree::domain::TrackId("no-source");
     item.track.title = "Missing source";
@@ -142,6 +155,54 @@ void BackendTests::databasePortRepositories() {
     QVERIFY(playlists.list().empty());
 }
 
+void BackendTests::metadataReaderMapsRegularFile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    QFile file(temp.filePath(QStringLiteral("reader-track.mp3")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write("placeholder-audio"), qint64(17));
+    file.close();
+
+    listenfree::infrastructure::library::BasicMetadataReader basicReader;
+    listenfree::application::IMetadataReader& reader = basicReader;
+    const auto track = reader.read(std::filesystem::path(file.fileName().toStdWString()));
+
+    QVERIFY(track.has_value());
+    QVERIFY(!track->id.empty());
+    QCOMPARE(QString::fromStdString(track->title), QStringLiteral("reader-track"));
+    QVERIFY(track->localPath.has_value());
+    QCOMPARE(QFileInfo(QString::fromStdString(*track->localPath)).canonicalFilePath(),
+             QFileInfo(file.fileName()).canonicalFilePath());
+}
+
+void BackendTests::metadataReaderAcceptsEmptyRegularFile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    QFile file(temp.filePath(QStringLiteral("empty-track.flac")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+
+    listenfree::infrastructure::library::BasicMetadataReader basicReader;
+    listenfree::application::IMetadataReader& reader = basicReader;
+    const auto track = reader.read(std::filesystem::path(file.fileName().toStdWString()));
+
+    QVERIFY(track.has_value());
+    QCOMPARE(QString::fromStdString(track->title), QStringLiteral("empty-track"));
+    QVERIFY(track->localPath.has_value());
+}
+
+void BackendTests::metadataReaderRejectsMissingFile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto missing = std::filesystem::path(
+        temp.filePath(QStringLiteral("missing-track.ogg")).toStdWString());
+
+    listenfree::infrastructure::library::BasicMetadataReader basicReader;
+    listenfree::application::IMetadataReader& reader = basicReader;
+
+    QVERIFY(!reader.read(missing).has_value());
+}
+
 void BackendTests::libraryScannerAdapter() {
     QTemporaryDir temp;
     QVERIFY(temp.isValid());
@@ -187,6 +248,12 @@ void BackendTests::sourceProtocolRejectsInvalidFrame() {
     QString error;
     QVERIFY(!listenfree::sourcehost::SourceProtocol::decode(QByteArray("bad"), output, &error));
     QCOMPARE(error, QStringLiteral("frame-too-short"));
+    listenfree::sourcehost::SourceMessage incompatible;
+    incompatible.protocolVersion = 2;
+    incompatible.requestId = QStringLiteral("version-2");
+    const auto encoded = listenfree::sourcehost::SourceProtocol::encode(incompatible);
+    QVERIFY(!listenfree::sourcehost::SourceProtocol::decode(encoded, output, &error));
+    QCOMPARE(error, QStringLiteral("unsupported-protocol-version"));
 }
 
 void BackendTests::sourceHostProcessLifecycle() {
@@ -232,6 +299,47 @@ void BackendTests::sourceHostCrashRecovery() {
     QTRY_COMPARE_WITH_TIMEOUT(restartedSpy.count(), 1, 3000);
     QVERIFY(client.running());
     client.stop();
+}
+
+void BackendTests::sourceHostStopPreventsRestart() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy crashedSpy(&client, &listenfree::sourcehost::SourceHostClient::crashed);
+    QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
+    connect(&client, &listenfree::sourcehost::SourceHostClient::crashed, &client,
+            &listenfree::sourcehost::SourceHostClient::stop);
+    QVERIFY(client.start());
+    listenfree::sourcehost::SourceMessage request;
+    request.type = listenfree::sourcehost::MessageType::Log;
+    request.requestId = QStringLiteral("crash-stop");
+    request.payload.insert(QStringLiteral("crash"), true);
+    QVERIFY(client.request(request, 1000));
+    QTRY_COMPARE_WITH_TIMEOUT(crashedSpy.count(), 1, 2000);
+    QTest::qWait(100);
+    QCOMPARE(restartedSpy.count(), 0);
+    QVERIFY(!client.running());
+}
+
+void BackendTests::sourceHostBoundsPendingRequests() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy protocolSpy(&client, &listenfree::sourcehost::SourceHostClient::protocolError);
+    QVERIFY(client.start());
+    for (int index = 0; index < 256; ++index) {
+        listenfree::sourcehost::SourceMessage request;
+        request.type = listenfree::sourcehost::MessageType::Search;
+        request.requestId = QStringLiteral("pending-%1").arg(index);
+        request.payload.insert(QStringLiteral("noReply"), true);
+        QVERIFY(client.request(request, 5000));
+    }
+    listenfree::sourcehost::SourceMessage overflow;
+    overflow.type = listenfree::sourcehost::MessageType::Search;
+    overflow.requestId = QStringLiteral("pending-overflow");
+    QVERIFY(!client.request(overflow, 5000));
+    QCOMPARE(protocolSpy.takeLast().at(0).toString(), QStringLiteral("too-many-pending-requests"));
+    client.stop();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCOMPARE(client.findChildren<QTimer*>().size(), 0);
 }
 
 void BackendTests::mockProvider() {

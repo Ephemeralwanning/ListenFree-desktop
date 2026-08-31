@@ -79,9 +79,11 @@ bool SourceProtocol::decode(const QByteArray& frame, SourceMessage& message, QSt
         !object.value(QStringLiteral("payload")).isObject()) {
         return fail(QStringLiteral("invalid-envelope"));
     }
+    const double protocolVersion = object.value(QStringLiteral("protocolVersion")).toDouble();
+    if (protocolVersion != 1.0) return fail(QStringLiteral("unsupported-protocol-version"));
     MessageType type;
     if (!typeFromName(object.value(QStringLiteral("messageType")).toString(), type)) return fail(QStringLiteral("unknown-message-type"));
-    message.protocolVersion = object.value(QStringLiteral("protocolVersion")).toInt();
+    message.protocolVersion = 1;
     message.type = type;
     message.requestId = object.value(QStringLiteral("requestId")).toString();
     message.payload = object.value(QStringLiteral("payload")).toObject();

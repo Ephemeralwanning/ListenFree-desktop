@@ -24,6 +24,7 @@ QtAudioPlayer::QtAudioPlayer(QObject* parent) : QObject(parent) {
         emit stateChanged();
         emit errorChanged(message);
     });
+    connect(&devices_, &QMediaDevices::audioOutputsChanged, this, &QtAudioPlayer::devicesChanged);
 }
 
 QString QtAudioPlayer::stateName() const {
@@ -69,5 +70,44 @@ void QtAudioPlayer::stop() { player_.stop(); }
 void QtAudioPlayer::seek(qint64 position) { player_.setPosition(position); }
 void QtAudioPlayer::seek(std::chrono::milliseconds position) { seek(position.count()); }
 void QtAudioPlayer::setVolume(float volume) { output_.setVolume(std::clamp(volume, 0.0F, 1.0F)); }
+
+std::uint32_t QtAudioPlayer::capabilities() const noexcept {
+    using application::PlaybackCapability;
+    return application::capabilityMask(PlaybackCapability::LocalFile) |
+           application::capabilityMask(PlaybackCapability::HttpStream) |
+           application::capabilityMask(PlaybackCapability::Seek) |
+           application::capabilityMask(PlaybackCapability::Volume) |
+           application::capabilityMask(PlaybackCapability::Mute) |
+           application::capabilityMask(PlaybackCapability::DeviceSelection);
+}
+
+std::vector<std::string> QtAudioPlayer::deviceIds() const {
+    std::vector<std::string> result;
+    const auto outputs = QMediaDevices::audioOutputs();
+    result.reserve(static_cast<std::size_t>(outputs.size()));
+    for (const auto& device : outputs) result.push_back(device.id().toStdString());
+    return result;
+}
+
+QStringList QtAudioPlayer::qtDeviceIds() const {
+    QStringList result;
+    const auto outputs = QMediaDevices::audioOutputs();
+    result.reserve(outputs.size());
+    for (const auto& device : outputs) result.push_back(QString::fromUtf8(device.id()));
+    return result;
+}
+
+bool QtAudioPlayer::select(std::string_view id) {
+    const QByteArray requested(id.data(), static_cast<qsizetype>(id.size()));
+    const auto outputs = QMediaDevices::audioOutputs();
+    const auto match = std::find_if(outputs.cbegin(), outputs.cend(), [&requested](const QAudioDevice& device) {
+        return device.id() == requested;
+    });
+    if (match == outputs.cend()) return false;
+    output_.setDevice(*match);
+    return true;
+}
+
+bool QtAudioPlayer::selectDevice(const QString& id) { return select(id.toStdString()); }
 
 } // namespace listenfree::media
