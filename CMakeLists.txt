@@ -12,6 +12,7 @@ set(CMAKE_AUTOUIC ON)
 option(LISTENFREE_BUILD_TESTS "Build ListenFree tests" ON)
 
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core Gui Qml Quick Sql Multimedia Network Concurrent Test)
+find_package(TagLib 2.3.1 CONFIG REQUIRED)
 qt_standard_project_setup(REQUIRES 6.11)
 
 add_library(listenfree_domain INTERFACE)
@@ -39,7 +40,7 @@ add_library(listenfree_library STATIC
     src/infrastructure/library/library_scanner.h
     src/infrastructure/library/library_scanner.cpp
 )
-target_link_libraries(listenfree_library PUBLIC listenfree_domain Qt6::Core Qt6::Concurrent)
+target_link_libraries(listenfree_library PUBLIC listenfree_domain Qt6::Core Qt6::Concurrent PRIVATE TagLib::tag)
 target_include_directories(listenfree_library PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(listenfree_media STATIC
@@ -95,7 +96,7 @@ target_link_libraries(listenfree PRIVATE listenfree_qmlbridge Qt6::Gui Qt6::Quic
 if(LISTENFREE_BUILD_TESTS)
     enable_testing()
     add_executable(listenfree_tests tests/backend_tests.cpp)
-    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client Qt6::Test Qt6::Sql)
+    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client TagLib::tag Qt6::Test Qt6::Sql)
     target_include_directories(listenfree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME listenfree_tests COMMAND listenfree_tests -platform offscreen)
 endif()

@@ -24,3 +24,12 @@ This log records reversible backend choices made without blocking design work. C
 - **Choice:** No. Use Qt 6.11.2 for all subsequent development and verification unless a concrete Qt bug requires a temporary exception.
 - **Reason:** The user confirmed the local Qt 6.11.2 installation and requested that version selection no longer block implementation.
 - **Review later:** Only when a specific regression or security issue is reproduced.
+
+## BID-004 — Use TagLib behind the metadata-reader port
+
+- **Question:** How should the local-library adapter obtain common audio tags and duration without growing a custom parser stack?
+- **Choice:** Use TagLib 2.3.1 through a locked vcpkg manifest and keep it private to `listenfree_library`; the application continues depending only on `IMetadataReader`.
+- **Reason:** TagLib is mature, format-focused and substantially smaller in scope than embedding FFmpeg solely for metadata. A short-lived `FileRef` gives deterministic cleanup, while the basic filename reader remains the fallback for malformed or unsupported files.
+- **Resource constraints:** Do not retain TagLib file/tag/property objects, do not load artwork in this reader, and process future scan results in bounded batches.
+- **Alternatives:** FFmpeg/libavformat; custom per-format parsers; Qt-only filename metadata.
+- **Review later:** After 1,000/10,000-track memory and handle baselines, or when a required format is unsupported.

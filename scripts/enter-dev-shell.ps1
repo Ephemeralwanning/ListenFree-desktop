@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$QtRoot = $env:LISTENFREE_QT_ROOT,
+    [string]$VcpkgRoot = $env:VCPKG_ROOT,
     [switch]$Quiet
 )
 
@@ -8,6 +9,9 @@ $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($QtRoot)) {
     $QtRoot = 'F:\qt\6.11.2\mingw_64'
+}
+if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+    $VcpkgRoot = 'F:\player\lx-music-desktop-master\_vendor\vcpkg'
 }
 
 $toolRoots = [ordered]@{
@@ -40,6 +44,13 @@ $env:LISTENFREE_QT_ROOT = $toolRoots.Qt
 $env:QT_ROOT = $toolRoots.Qt
 $env:CMAKE_PREFIX_PATH = $toolRoots.Qt
 $env:QT_HOST_PATH = $toolRoots.Qt
+$env:VCPKG_ROOT = $VcpkgRoot
+$env:VCPKG_DEFAULT_TRIPLET = 'x64-mingw-dynamic'
+$env:VCPKG_DEFAULT_HOST_TRIPLET = 'x64-mingw-dynamic'
+
+if (-not (Test-Path -LiteralPath (Join-Path $VcpkgRoot 'vcpkg.exe') -PathType Leaf)) {
+    throw "ListenFree vcpkg executable was not found at '$VcpkgRoot'."
+}
 
 $pathEntries = @(
     (Join-Path $toolRoots.Qt 'bin'),
@@ -56,4 +67,5 @@ if (-not $Quiet) {
     Write-Output "Qt root: $($toolRoots.Qt)"
     Write-Output "Generator: Ninja"
     Write-Output "Compiler: MinGW x64"
+    Write-Output "vcpkg root: $VcpkgRoot"
 }

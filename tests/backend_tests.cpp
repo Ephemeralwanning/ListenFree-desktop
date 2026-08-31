@@ -10,10 +10,13 @@
 #include "sourcehost/sourcehost_client.h"
 
 #include <QCoreApplication>
+#include <QDataStream>
 #include <QFileInfo>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtTest>
+
+#include <taglib/wavfile.h>
 
 #include <array>
 #include <filesystem>
@@ -30,6 +33,8 @@ private slots:
     void metadataReaderMapsRegularFile();
     void metadataReaderAcceptsEmptyRegularFile();
     void metadataReaderRejectsMissingFile();
+    void tagLibMetadataReaderFallsBackForInvalidMedia();
+    void tagLibMetadataReaderMapsWavTags();
     void libraryScannerAdapter();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
@@ -201,6 +206,73 @@ void BackendTests::metadataReaderRejectsMissingFile() {
     listenfree::application::IMetadataReader& reader = basicReader;
 
     QVERIFY(!reader.read(missing).has_value());
+}
+
+void BackendTests::tagLibMetadataReaderFallsBackForInvalidMedia() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("fallback.mp3"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write("not-a-media-file"), 16);
+    file.close();
+
+    listenfree::infrastructure::library::TagLibMetadataReader reader;
+    const auto track = reader.read(std::filesystem::path(path.toStdWString()));
+
+    QVERIFY(track.has_value());
+    QCOMPARE(QString::fromStdString(track->title), QStringLiteral("fallback"));
+    QCOMPARE(QString::fromStdString(track->localPath.value_or("")), QDir::toNativeSeparators(path));
+    QVERIFY(track->artists.empty());
+    QVERIFY(!track->album.has_value());
+    QCOMPARE(track->duration, std::chrono::milliseconds(0));
+}
+
+void BackendTests::tagLibMetadataReaderMapsWavTags() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("tagged.wav"));
+
+    constexpr quint32 sampleRate = 8000;
+    constexpr quint32 dataSize = sampleRate;
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QDataStream stream(&file);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    QCOMPARE(stream.writeRawData("RIFF", 4), 4);
+    stream << quint32(36 + dataSize);
+    QCOMPARE(stream.writeRawData("WAVEfmt ", 8), 8);
+    stream << quint32(16) << quint16(1) << quint16(1) << sampleRate << sampleRate
+           << quint16(1) << quint16(8);
+    QCOMPARE(stream.writeRawData("data", 4), 4);
+    stream << dataSize;
+    const QByteArray silence(static_cast<qsizetype>(dataSize), char(128));
+    QCOMPARE(stream.writeRawData(silence.constData(), static_cast<qsizetype>(dataSize)),
+             static_cast<int>(dataSize));
+    QCOMPARE(stream.status(), QDataStream::Ok);
+    file.close();
+
+    {
+        TagLib::RIFF::WAV::File taggedFile(path.toStdWString().c_str());
+        QVERIFY(taggedFile.isValid());
+        QVERIFY(taggedFile.tag() != nullptr);
+        taggedFile.tag()->setTitle(TagLib::String("Tagged title", TagLib::String::UTF8));
+        taggedFile.tag()->setArtist(TagLib::String("Tagged artist", TagLib::String::UTF8));
+        taggedFile.tag()->setAlbum(TagLib::String("Tagged album", TagLib::String::UTF8));
+        QVERIFY(taggedFile.save());
+    }
+
+    listenfree::infrastructure::library::TagLibMetadataReader reader;
+    const auto track = reader.read(std::filesystem::path(path.toStdWString()));
+
+    QVERIFY(track.has_value());
+    QCOMPARE(QString::fromStdString(track->title), QStringLiteral("Tagged title"));
+    QCOMPARE(track->artists.size(), std::size_t(1));
+    QCOMPARE(QString::fromStdString(track->artists.front().name), QStringLiteral("Tagged artist"));
+    QVERIFY(track->album.has_value());
+    QCOMPARE(QString::fromStdString(track->album->title), QStringLiteral("Tagged album"));
+    QCOMPARE(track->duration, std::chrono::seconds(1));
+    QVERIFY2(QFile::remove(path), "Metadata reader retained an open file handle");
 }
 
 void BackendTests::libraryScannerAdapter() {

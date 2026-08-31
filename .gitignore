@@ -2,6 +2,7 @@
 /build/
 /out/
 /dist/
+/.vcpkg_installed/
 
 # Qt/CMake generated metadata
 .qt/

@@ -4,6 +4,10 @@
 #include <QFileInfo>
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <taglib/audioproperties.h>
+#include <taglib/fileref.h>
+#include <taglib/tag.h>
+
 #include <system_error>
 
 namespace listenfree::infrastructure::library {
@@ -68,10 +72,44 @@ std::optional<domain::Track> BasicMetadataReader::read(const std::filesystem::pa
     return track;
 }
 
+std::optional<domain::Track> TagLibMetadataReader::read(const std::filesystem::path& path) {
+    auto track = fallback_.read(path);
+    if (!track) return std::nullopt;
+
+    std::error_code error;
+    const auto canonical = std::filesystem::weakly_canonical(path, error);
+    if (error) return track;
+
+#ifdef Q_OS_WIN
+    TagLib::FileRef file(canonical.c_str(), true, TagLib::AudioProperties::Fast);
+#else
+    TagLib::FileRef file(canonical.string().c_str(), true, TagLib::AudioProperties::Fast);
+#endif
+    if (file.isNull()) return track;
+
+    if (const auto* tag = file.tag()) {
+        const auto title = tag->title().to8Bit(true);
+        if (!title.empty()) track->title = title;
+
+        const auto artist = tag->artist().to8Bit(true);
+        if (!artist.empty()) track->artists = {{artist, artist}};
+
+        const auto album = tag->album().to8Bit(true);
+        if (!album.empty()) track->album = domain::Album{album, album, std::nullopt};
+    }
+
+    if (const auto* properties = file.audioProperties()) {
+        const auto milliseconds = properties->lengthInMilliseconds();
+        if (milliseconds > 0) track->duration = std::chrono::milliseconds(milliseconds);
+    }
+
+    return track;
+}
+
 LocalLibraryScannerAdapter::LocalLibraryScannerAdapter(
     std::unique_ptr<application::IMetadataReader> metadataReader, QObject* parent)
     : QObject(parent), scanner_(this), metadataReader_(std::move(metadataReader)) {
-    if (!metadataReader_) metadataReader_ = std::make_unique<BasicMetadataReader>();
+    if (!metadataReader_) metadataReader_ = std::make_unique<TagLibMetadataReader>();
     connect(&scanner_, &LibraryScanner::tracksFound, this, [this](const QVector<QString>& paths) {
         for (const auto& path : paths) {
             if (cancelled_ && cancelled_()) {

@@ -35,6 +35,14 @@ public:
     std::optional<domain::Track> read(const std::filesystem::path& path) override;
 };
 
+class TagLibMetadataReader final : public application::IMetadataReader {
+public:
+    std::optional<domain::Track> read(const std::filesystem::path& path) override;
+
+private:
+    BasicMetadataReader fallback_;
+};
+
 class LocalLibraryScannerAdapter final : public QObject, public application::ILocalLibraryScanner {
     Q_OBJECT
 public:

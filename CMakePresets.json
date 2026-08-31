@@ -10,6 +10,10 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_PREFIX_PATH": "$env{LISTENFREE_QT_ROOT}",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/.vcpkg_installed",
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic",
         "LISTENFREE_BUILD_TESTS": "ON"
       }
     },
@@ -21,6 +25,10 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_PREFIX_PATH": "$env{LISTENFREE_QT_ROOT}",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/.vcpkg_installed",
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic",
         "LISTENFREE_BUILD_TESTS": "ON"
       }
     }
