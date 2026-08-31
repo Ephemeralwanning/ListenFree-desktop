@@ -14,12 +14,27 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QtTest>
 
 #include <taglib/wavfile.h>
 
 #include <array>
+#include <atomic>
 #include <filesystem>
+
+class ThreadRecordingMetadataReader final : public listenfree::application::IMetadataReader {
+public:
+    std::optional<listenfree::domain::Track> read(const std::filesystem::path& path) override {
+        readThread.store(QThread::currentThread());
+        return fallback.read(path);
+    }
+
+    std::atomic<QThread*> readThread{nullptr};
+
+private:
+    listenfree::infrastructure::library::BasicMetadataReader fallback;
+};
 
 class BackendTests final : public QObject {
     Q_OBJECT
@@ -35,6 +50,7 @@ private slots:
     void metadataReaderRejectsMissingFile();
     void tagLibMetadataReaderFallsBackForInvalidMedia();
     void tagLibMetadataReaderMapsWavTags();
+    void libraryScannerUsesBoundedBatchesOffOwnerThread();
     void libraryScannerAdapter();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
@@ -273,6 +289,36 @@ void BackendTests::tagLibMetadataReaderMapsWavTags() {
     QCOMPARE(QString::fromStdString(track->album->title), QStringLiteral("Tagged album"));
     QCOMPARE(track->duration, std::chrono::seconds(1));
     QVERIFY2(QFile::remove(path), "Metadata reader retained an open file handle");
+}
+
+void BackendTests::libraryScannerUsesBoundedBatchesOffOwnerThread() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    constexpr int fileCount = 129;
+    for (int index = 0; index < fileCount; ++index) {
+        QFile file(directory.filePath(QStringLiteral("track-%1.mp3").arg(index)));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+    }
+
+    listenfree::infrastructure::library::LibraryScanner scanner;
+    auto reader = std::make_shared<ThreadRecordingMetadataReader>();
+    QVector<qsizetype> batchSizes;
+    bool callbacksOnOwnerThread = true;
+    connect(&scanner, &listenfree::infrastructure::library::LibraryScanner::tracksFound,
+            &scanner, [&](QVector<listenfree::domain::Track> tracks) {
+                callbacksOnOwnerThread = callbacksOnOwnerThread &&
+                                         QThread::currentThread() == scanner.thread();
+                batchSizes.push_back(tracks.size());
+            });
+    QSignalSpy finished(&scanner, &listenfree::infrastructure::library::LibraryScanner::finished);
+
+    scanner.start({directory.path()}, reader);
+
+    QVERIFY(finished.wait(5000));
+    QCOMPARE(batchSizes, QVector<qsizetype>({64, 64, 1}));
+    QVERIFY(callbacksOnOwnerThread);
+    QVERIFY(reader->readThread.load() != nullptr);
+    QVERIFY(reader->readThread.load() != scanner.thread());
 }
 
 void BackendTests::libraryScannerAdapter() {

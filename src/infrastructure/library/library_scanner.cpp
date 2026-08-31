@@ -2,6 +2,7 @@
 
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QPromise>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <taglib/audioproperties.h>
@@ -12,13 +13,26 @@
 
 namespace listenfree::infrastructure::library {
 
+namespace {
+constexpr qsizetype scanBatchSize = 64;
+constexpr int pendingBatchLimit = 2;
+}
+
 LibraryScanner::LibraryScanner(QObject* parent) : QObject(parent) {
-    connect(&watcher_, &QFutureWatcher<QVector<QString>>::finished, this, [this] {
+    watcher_.setPendingResultsLimit(pendingBatchLimit);
+    connect(&watcher_, &QFutureWatcher<ScanBatchPtr>::resultReadyAt, this, [this](int index) {
+        const auto batch = watcher_.resultAt(index);
+        if (!batch || batch->generation != generation_) return;
+        if (!batch->error.isEmpty()) emit failed(batch->error);
+        if (!batch->tracks.isEmpty()) emit tracksFound(std::move(batch->tracks));
+        batch->tracks.clear();
+        batch->tracks.squeeze();
+    });
+    connect(&watcher_, &QFutureWatcher<ScanBatchPtr>::finished, this, [this] {
         if (cancelled_ && cancelled_->load()) {
             emit finished();
             return;
         }
-        emit tracksFound(watcher_.result());
         emit finished();
     });
 }
@@ -28,7 +42,9 @@ LibraryScanner::~LibraryScanner() {
     watcher_.waitForFinished();
 }
 
-void LibraryScanner::start(const QStringList& roots, bool recursive) {
+void LibraryScanner::start(const QStringList& roots,
+                           std::shared_ptr<application::IMetadataReader> metadataReader,
+                           bool recursive) {
     cancel();
     // Do not replace the watcher future while the previous worker still owns
     // its cancellation token and result buffer. Cancellation is cooperative,
@@ -36,27 +52,65 @@ void LibraryScanner::start(const QStringList& roots, bool recursive) {
     watcher_.waitForFinished();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     const auto token = cancelled_;
-    watcher_.setFuture(QtConcurrent::run([roots, recursive, token] {
-        QVector<QString> paths;
+    const auto generation = generation_;
+    watcher_.setFuture(QtConcurrent::run([roots, recursive, token, generation, reader = std::move(metadataReader)](
+                                             QPromise<ScanBatchPtr>& promise) {
+        if (!reader) {
+            auto batch = std::make_shared<ScanBatch>();
+            batch->error = QStringLiteral("Metadata reader is not configured.");
+            batch->generation = generation;
+            promise.addResult(std::move(batch));
+            return;
+        }
+
         const QStringList filters{QStringLiteral("*.mp3"), QStringLiteral("*.flac"), QStringLiteral("*.wav"),
                                   QStringLiteral("*.aac"), QStringLiteral("*.m4a"), QStringLiteral("*.ogg"),
                                   QStringLiteral("*.oga"), QStringLiteral("*.opus"), QStringLiteral("*.wma"),
                                   QStringLiteral("*.ape"), QStringLiteral("*.wv"), QStringLiteral("*.aiff"),
                                   QStringLiteral("*.aif"), QStringLiteral("*.tta"), QStringLiteral("*.mp4")};
-        for (const QString& root : roots) {
-            const auto flags = recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
-            QDirIterator it(root, filters, QDir::Files, flags);
-            while (it.hasNext()) {
-                if (token->load()) return paths;
-                paths.push_back(it.next());
+
+        auto batch = std::make_shared<ScanBatch>();
+        batch->generation = generation;
+        batch->tracks.reserve(scanBatchSize);
+        const auto flush = [&] {
+            if (batch->tracks.isEmpty()) return true;
+            if (!promise.addResult(batch)) return false;
+            batch = std::make_shared<ScanBatch>();
+            batch->generation = generation;
+            batch->tracks.reserve(scanBatchSize);
+            return true;
+        };
+
+        try {
+            for (const QString& root : roots) {
+                const auto flags = recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
+                QDirIterator it(root, filters, QDir::Files, flags);
+                while (it.hasNext()) {
+                    if (token->load() || promise.isCanceled()) return;
+                    const auto path = std::filesystem::path(it.next().toStdWString());
+                    if (auto track = reader->read(path)) batch->tracks.push_back(std::move(*track));
+                    if (batch->tracks.size() >= scanBatchSize && !flush()) return;
+                }
             }
+            flush();
+        } catch (const std::exception& exception) {
+            auto errorBatch = std::make_shared<ScanBatch>();
+            errorBatch->error = QString::fromUtf8(exception.what());
+            errorBatch->generation = generation;
+            promise.addResult(std::move(errorBatch));
+        } catch (...) {
+            auto errorBatch = std::make_shared<ScanBatch>();
+            errorBatch->error = QStringLiteral("Local library scan failed.");
+            errorBatch->generation = generation;
+            promise.addResult(std::move(errorBatch));
         }
-        return paths;
     }));
 }
 
 void LibraryScanner::cancel() {
+    ++generation_;
     if (cancelled_) cancelled_->store(true);
+    if (watcher_.isRunning()) watcher_.cancel();
 }
 
 std::optional<domain::Track> BasicMetadataReader::read(const std::filesystem::path& path) {
@@ -110,14 +164,13 @@ LocalLibraryScannerAdapter::LocalLibraryScannerAdapter(
     std::unique_ptr<application::IMetadataReader> metadataReader, QObject* parent)
     : QObject(parent), scanner_(this), metadataReader_(std::move(metadataReader)) {
     if (!metadataReader_) metadataReader_ = std::make_unique<TagLibMetadataReader>();
-    connect(&scanner_, &LibraryScanner::tracksFound, this, [this](const QVector<QString>& paths) {
-        for (const auto& path : paths) {
+    connect(&scanner_, &LibraryScanner::tracksFound, this, [this](QVector<domain::Track> tracks) {
+        for (auto& track : tracks) {
             if (cancelled_ && cancelled_()) {
                 scanner_.cancel();
                 break;
             }
-            const auto track = metadataReader_->read(std::filesystem::path(path.toStdWString()));
-            if (track && onTrack_) onTrack_(*track);
+            if (onTrack_) onTrack_(std::move(track));
         }
     });
     connect(&scanner_, &LibraryScanner::failed, this, [this](const QString& message) {
@@ -131,12 +184,13 @@ void LocalLibraryScannerAdapter::start(const application::ScanRequest& request,
                                        std::function<void(domain::Track)> onTrack,
                                        std::function<void(std::string)> onError,
                                        application::CancelCallback cancelled) {
+    cancel();
+    QStringList roots;
+    for (const auto& root : request.roots) roots.push_back(QString::fromStdWString(root.wstring()));
+    scanner_.start(roots, metadataReader_, request.recursive);
     onTrack_ = std::move(onTrack);
     onError_ = std::move(onError);
     cancelled_ = std::move(cancelled);
-    QStringList roots;
-    for (const auto& root : request.roots) roots.push_back(QString::fromStdWString(root.wstring()));
-    scanner_.start(roots, request.recursive);
 }
 
 void LocalLibraryScannerAdapter::cancel() {

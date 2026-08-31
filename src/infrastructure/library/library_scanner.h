@@ -7,9 +7,18 @@
 #include <QFutureWatcher>
 #include <QStringList>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 
 namespace listenfree::infrastructure::library {
+
+struct ScanBatch {
+    QVector<domain::Track> tracks;
+    QString error;
+    std::uint64_t generation{0};
+};
+
+using ScanBatchPtr = std::shared_ptr<ScanBatch>;
 
 class LibraryScanner final : public QObject {
     Q_OBJECT
@@ -17,17 +26,19 @@ public:
     explicit LibraryScanner(QObject* parent = nullptr);
     ~LibraryScanner() override;
 
-    void start(const QStringList& roots, bool recursive = true);
+    void start(const QStringList& roots, std::shared_ptr<application::IMetadataReader> metadataReader,
+               bool recursive = true);
     void cancel();
 
 signals:
-    void tracksFound(const QVector<QString>& paths);
+    void tracksFound(QVector<domain::Track> tracks);
     void finished();
     void failed(const QString& message);
 
 private:
-    QFutureWatcher<QVector<QString>> watcher_;
+    QFutureWatcher<ScanBatchPtr> watcher_;
     std::shared_ptr<std::atomic_bool> cancelled_;
+    std::uint64_t generation_{0};
 };
 
 class BasicMetadataReader final : public application::IMetadataReader {
@@ -56,7 +67,7 @@ public:
 
 private:
     LibraryScanner scanner_;
-    std::unique_ptr<application::IMetadataReader> metadataReader_;
+    std::shared_ptr<application::IMetadataReader> metadataReader_;
     std::function<void(domain::Track)> onTrack_;
     std::function<void(std::string)> onError_;
     application::CancelCallback cancelled_;
