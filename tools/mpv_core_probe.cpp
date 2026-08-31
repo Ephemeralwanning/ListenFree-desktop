@@ -16,6 +16,8 @@ bool setOption(mpv_handle* context, const char* name, const char* value) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // Upstream runtime verified: shinchiro/mpv-winbuild-cmake release
+    // 20260831 (git-e8673660ab), x86_64-v3 libmpv package.
     QTextStream out(stdout);
     if (argc != 1 && argc != 2) {
         QTextStream(stderr) << "Usage: listenfree-mpv-core-probe [audio-file]\n";
