@@ -4,11 +4,12 @@
 
 | 依赖 | 版本 | 用途 | 链接方式 | 包体/常驻内存影响 | 替代方案 |
 |---|---|---|---|---|---|
-| Qt | 6.11.2 | Core、Gui、QML、Quick、SQL、Network、Multimedia、Concurrent、Test、ShaderTools | 系统外部 Qt kit，通过 CMake `find_package` | 由实际部署模块决定；不引入 WebEngine/Chromium | Qt 6.8 LTS（发布分支候选） |
+| Qt | 6.11.2 | Core、Gui、QML、Quick、SQL、Network、Multimedia、Concurrent、Test、ShaderTools | 系统外部 Qt kit，通过 CMake `find_package`；Windows 构建在固定源码提交上应用仓库补丁并仅覆盖产物目录的 `Qt6Multimedia.dll` | 由实际部署模块决定；不引入 WebEngine/Chromium；补丁不新增运行时库 | 等待等价 Qt upstream 修复；后续 FFmpeg + cubeb 适配器 |
 | SQLite | Qt SQL 内置 SQLite driver | 本地库、设置、缓存和迁移 | 通过 Qt SQL，不额外嵌入第三方 ORM | 小型原生库；连接按线程创建并及时关闭 | 原生 SQLite C API（不优先） |
 | CMake/Ninja | 3.30.5 / 1.12.1 | 构建和测试编排 | 项目级 Presets 与开发 shell | 仅构建期，不进入运行时 | Visual Studio generator |
 | aqtinstall | 3.3.0 | 用户级安装 Qt 6.11.2 kit | Python 用户包，安装期使用 | 不进入应用包或运行时 | Qt Maintenance Tool（当前企业账户认证失败） |
 | TagLib | 2.3.1 | 本地音频标签与时长读取 | vcpkg manifest，固定 baseline `2687ff07e8ca1e7f56030e809c8c2c5227975a7b`，动态链接；Debug/Release 共用 `.vcpkg_installed` | 扫描时创建短生命周期 `FileRef`；不缓存 TagLib 对象或封面；包体与峰值内存待基准测试记录 | ffmpeg/libavformat（过重）、按格式自研解析器（维护成本高） |
+| Vulkan-Headers | 1.4.357 (`e3b1eec08173d6b825cd3ac88c885a63b621504a`) | 在 Qt kit 未附 Vulkan headers 时配置 Qt Multimedia 源码构建 | 构建脚本固定 tag/commit；Apache-2.0；仅头文件、仅构建期 | 不进入 ListenFree 运行时或安装包 | 使用 Qt kit 自带 Vulkan headers |
 
 ## 选择纪律
 

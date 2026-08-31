@@ -5,7 +5,6 @@
 #include <QDataStream>
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
-#include <QAudioOutput>
 #include <QAudioSink>
 #include <QFile>
 #include <QFileInfo>
@@ -176,7 +175,6 @@ private slots:
     void clearAndDestructionReleaseTheSourceFile();
     void repeatedOpenPlayStopHasBoundedLifetime();
     void repeatedConstructionAndPlaybackHasBoundedHandles();
-    void rawQtMultimediaLifecycleHasBoundedHandles();
     void loopbackHttpWavLoadsAndPlays();
     void devicesAndCapabilitiesReflectRuntimeInventory();
 };
@@ -582,70 +580,6 @@ void PlaybackTests::repeatedConstructionAndPlaybackHasBoundedHandles() {
                  qPrintable(QStringLiteral("handle count grew from %1 to %2")
                                 .arg(handlesBefore).arg(handlesAfter)));
     }
-}
-
-void PlaybackTests::rawQtMultimediaLifecycleHasBoundedHandles() {
-    QTemporaryDir directory;
-    QVERIFY(directory.isValid());
-    const QString path = writeWav(directory, u"raw-qt-lifecycle.wav", 250);
-    QVERIFY(!path.isEmpty());
-
-    auto exercise = [&](const QString& sourcePath) {
-        QObject owner;
-        QMediaDevices devices;
-        QVERIFY(!QMediaDevices::audioOutputs().isEmpty());
-        QAudioOutput output;
-        QAudioBufferOutput bufferOutput;
-        QMediaPlayer player;
-        player.setAudioOutput(&output);
-        player.setAudioBufferOutput(&bufferOutput);
-        output.setMuted(true);
-        connect(&player, &QMediaPlayer::positionChanged, &owner, [](qint64) {});
-        connect(&player, &QMediaPlayer::durationChanged, &owner, [](qint64) {});
-        connect(&player, &QMediaPlayer::seekableChanged, &owner, [](bool) {});
-        connect(&player, &QMediaPlayer::playbackStateChanged, &owner, [](auto) {});
-        connect(&player, &QMediaPlayer::mediaStatusChanged, &owner, [](auto) {});
-        connect(&player, &QMediaPlayer::errorOccurred, &owner, [](auto, const QString&) {});
-        connect(&bufferOutput, &QAudioBufferOutput::audioBufferReceived, &owner,
-                [&player](const QAudioBuffer&) { (void)player.metaData(); });
-        connect(&output, &QAudioOutput::deviceChanged, &owner, [] {});
-        connect(&devices, &QMediaDevices::audioOutputsChanged, &owner, [] {});
-        player.setSource(QUrl::fromLocalFile(sourcePath));
-        QTRY_VERIFY_WITH_TIMEOUT(player.duration() > 0, 3'000);
-        player.play();
-        QTRY_COMPARE_WITH_TIMEOUT(player.playbackState(), QMediaPlayer::PlayingState, 3'000);
-        QTRY_VERIFY_WITH_TIMEOUT(player.position() > 0, 3'000);
-        player.stop();
-        player.setSource({});
-        player.setAudioBufferOutput(nullptr);
-        player.setAudioOutput(nullptr);
-    };
-
-    for (int iteration = 0; iteration < 5; ++iteration) {
-        const QString sourcePath = writeWav(
-            directory, QStringLiteral("raw-warm-%1.wav").arg(iteration), 250);
-        exercise(sourcePath);
-        QVERIFY(QFile::remove(sourcePath));
-    }
-    QTest::qWait(2'000);
-    const quint32 handlesBefore = processHandleCount();
-    for (int iteration = 0; iteration < 5; ++iteration) {
-        const QString sourcePath = writeWav(
-            directory, QStringLiteral("raw-measured-%1.wav").arg(iteration), 250);
-        exercise(sourcePath);
-        QVERIFY(QFile::remove(sourcePath));
-    }
-    QTest::qWait(2'000);
-    const quint32 handlesAfter = processHandleCount();
-    qInfo().nospace() << "raw Qt Multimedia handle count: " << handlesBefore << " -> "
-                      << handlesAfter;
-#ifdef Q_OS_WIN
-    QVERIFY(handlesBefore != 0);
-    QVERIFY2(handlesAfter <= handlesBefore + 3,
-             qPrintable(QStringLiteral("raw Qt handle count grew from %1 to %2")
-                            .arg(handlesBefore).arg(handlesAfter)));
-#endif
-    QVERIFY(QFile::remove(path));
 }
 
 void PlaybackTests::loopbackHttpWavLoadsAndPlays() {

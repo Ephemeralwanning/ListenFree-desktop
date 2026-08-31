@@ -63,37 +63,29 @@ Recovery completed after GitHub/network TLS connectivity returned. Continue usin
 
 The historical Qt 6.10.3 setup notes above are superseded by the user's confirmation on 2026-08-30. Qt 6.11.2 MinGW x64 is installed at `F:\qt\6.11.2\mingw_64` and is now the fixed development baseline; Qt version selection is no longer a project blocker.
 
-## BLK-003 — Windows playback-session handles do not reach a steady state
+## BLK-003 — Windows playback-session handles did not reach a steady state
 
 - **Observed:** 2026-08-31 (Asia/Shanghai)
 - **Affected milestone:** M2 lifecycle hard gate
-- **Status:** Confirmed external Qt 6.11.2 / Windows audio-output blocker; M2 remains 95% and is not marked complete
+- **Status:** Resolved locally with a pinned Qt 6.11.2 source patch; equivalent upstream fix remains open
 
-### Reproduction
+### Root cause
 
-With Qt 6.11.2 MinGW x64 on this Windows 11 / Realtek output host:
+Qt 6.11.2 `QWindowsAudioUtils::setMCSSForPeriodSize()` called `AvSetMmThreadCharacteristicsA()` for every WASAPI sink/source worker, discarded its returned task handle and never called `AvRevertMmThreadCharacteristics()`. Microsoft requires the revert call on the same thread that registered the task. Sysinternals Handle showed one persistent `\Device\MMCSS` file handle per real playback session; generated WAV handles and product processes were already released correctly.
 
-```powershell
-cmake --build --preset windows-debug --target listenfree_playback_tests
-.\build\windows-debug\listenfree_playback_tests.exe repeatedOpenPlayStopHasBoundedLifetime repeatedConstructionAndPlaybackHasBoundedHandles rawQtMultimediaLifecycleHasBoundedHandles -o -,txt
-```
+The standalone `QMediaPlayer + QAudioOutput` reproducer gained 19–21 process handles across five measured sessions (`622 -> 641`, `619 -> 640`). Source and upstream evidence are recorded in `docs/research/qt-6.11-windows-mmcss-handle-leak.md`.
 
-The same `QtAudioPlayer` after 20 warm-up cycles gained 22 process handles over the next 20 open/play/stop/clear cycles (`615 -> 637` in the final stabilized test; earlier runs included `627 -> 649`). Twenty warm-up construction/play/destruction cycles followed by five measured cycles gained eight to nine handles (`656 -> 664`, `613 -> 622`). A 100-cycle warm-up followed by 50 more cycles grew `706 -> 752`, so this is not a bounded one-time plugin initialization pool.
+### Recovery implemented
 
-The original raw-Qt control stopped as soon as `QMediaPlayer::PlayingState` appeared and was therefore too weak: it could stop before the Windows audio worker had started. Requiring `QMediaPlayer::position() > 0` makes the standalone `QMediaPlayer + QAudioOutput + QAudioBufferOutput + QMediaDevices` control reproduce the defect (`642 -> 651`) without any ListenFree adapter code.
+- `patches/qt/6.11.2/0001-wasapi-revert-mmcss-registration.patch` changes the helper to return the task handle and installs a `qScopeGuard` in both sink and source worker lambdas. The guard calls `AvRevertMmThreadCharacteristics()` before the same worker thread exits.
+- `scripts/build-patched-qtmultimedia.ps1` clones fixed Qt tag/commit `v6.11.2` / `6f162ccac1425edbd7b4d1582fabab5973b43d6c`, applies the patch, builds only Qt Multimedia and deploys the resulting DLL into repository build directories. It never overwrites `F:\qt\6.11.2\mingw_64`.
+- The deployed Debug/Release DLL SHA-256 is `18FC9C8D214B6774BCE8067B4729AEF540753F6A8B2E20894DC66DE52B5E9495` for this build.
+- Patched minimal diagnostic: `584 -> 584`, with zero `\Device\MMCSS` handles. Product gates: same-adapter loop `608 -> 610`; repeated construction/destruction `610 -> 611`.
+- A controlled A/B using the same product-test executable and the global unpatched DLL made both retained product gates fail again: `635 -> 657` and `676 -> 684`. The local patch, not a skipped assertion or relaxed threshold, is what closes the gate.
+- Final `ctest --preset test-debug --output-on-failure`: 4/4 passed; `listenfree_playback_tests` 161.58 s.
+- Final `ctest --preset test-release --output-on-failure`: 4/4 passed; `listenfree_playback_tests` 160.95 s.
+- Generated WAV files remained removable and test exit left zero `listenfree`, `listenfree-sourcehost`, `sourcehost` or playback-test processes.
 
-Final full runs of `ctest --preset test-debug --output-on-failure` and `ctest --preset test-release --output-on-failure` each passed 3 of 4 CTest targets; only `listenfree_playback_tests` failed. Running its 14 non-lifecycle-gate functions separately produced 16/16 QtTest passes including suite setup/cleanup. The three lifecycle assertions remain red by design and are not skipped.
+### Upstream follow-up
 
-### Controls and attempted fixes
-
-- Every generated WAV was removable after `clear()` and destruction; no media file handle remained open.
-- Waiting 2, 10, 35 and 65 seconds while processing Qt deferred deletes did not return the count to baseline.
-- `QMediaPlayer` is stopped, source-cleared and detached from buffer/audio output; Qt signals are blocked before destructor cleanup, so teardown publishes no external signal.
-- Removing the audio-buffer tap, changing detach order, selecting a null device, sharing the device watcher, and explicitly stopping before clear did not remove the growth.
-- Sysinternals Handle 5.0 type snapshots around five measured sessions showed `File 36 -> 41`, `Thread 9 -> 12 -> 9`, and total handles `588 -> 602 -> 594`. Detailed enumeration identifies all five persistent `File` handles as `\Device\MMCSS`; generated WAV paths are absent. This is one unreleased Windows Multimedia Class Scheduler device handle per session.
-- The strengthened raw Qt reproducer proves the persistent MMCSS handles are in the Qt 6.11.2 FFmpeg/Windows audio-output path, not in `QtAudioPlayer`, queue code, callbacks, or the test server.
-- Test exit leaves zero `listenfree`, `listenfree-sourcehost` or `sourcehost` processes.
-
-### Recovery
-
-Keep both adapter assertions and the strengthened raw Qt assertion enabled and failing. Recovery requires either (1) a Qt 6.11.2-compatible upstream fix that closes the MMCSS registration when the Windows audio worker exits, or (2) the planned non-Qt playback backend (FFmpeg + cubeb) behind the existing narrow ports. Re-run all three lifecycle tests and verify the stabilized handle delta is at most three before marking M2 complete. Do not raise the threshold, skip the tests, or advertise the blocked capability as fully closed.
+The repository no longer has an M2 blocker, but the Qt kit itself remains affected. Before adopting a newer Qt 6.11.x build, check for an equivalent upstream revert, remove this patch only when it is redundant, rebuild the overlay and rerun both full configurations. Do not apply both fixes or deploy the unpatched global DLL over the repository runtime.

@@ -2,11 +2,17 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
+    [switch]$SkipQtMultimediaPatch,
     [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'enter-dev-shell.ps1') -Quiet
+
+if (-not $SkipQtMultimediaPatch) {
+    & (Join-Path $PSScriptRoot 'build-patched-qtmultimedia.ps1') -Deploy
+    if ($LASTEXITCODE -ne 0) { throw 'Patched Qt Multimedia build failed' }
+}
 
 $preset = "windows-$($Configuration.ToLowerInvariant())"
 cmake --preset $preset
