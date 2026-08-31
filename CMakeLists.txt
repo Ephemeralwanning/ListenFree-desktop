@@ -10,6 +10,8 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 option(LISTENFREE_BUILD_TESTS "Build ListenFree tests" ON)
+option(LISTENFREE_BUILD_MPV_PROBE "Build the optional libmpv capability probe" OFF)
+set(LISTENFREE_MPV_ROOT "" CACHE PATH "Root of an extracted libmpv development package")
 
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core Gui Qml Quick Sql Multimedia Network Concurrent Test)
 find_package(TagLib 2.3.1 CONFIG REQUIRED)
@@ -63,6 +65,26 @@ target_include_directories(listenfree_source_protocol PUBLIC ${CMAKE_CURRENT_SOU
 
 add_executable(listenfree-sourcehost src/sourcehost/sourcehost_main.cpp)
 target_link_libraries(listenfree-sourcehost PRIVATE listenfree_source_protocol Qt6::Core)
+
+# Local-only, non-destructive scanner experiment. It defaults to an in-memory
+# database and is intentionally separate from the GUI executable.
+add_executable(listenfree-library-scan-probe tools/library_scan_probe.cpp)
+target_link_libraries(listenfree-library-scan-probe PRIVATE listenfree_library listenfree_database Qt6::Core Qt6::Sql)
+target_include_directories(listenfree-library-scan-probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+if(LISTENFREE_BUILD_MPV_PROBE)
+    if(NOT LISTENFREE_MPV_ROOT)
+        message(FATAL_ERROR "LISTENFREE_MPV_ROOT is required when LISTENFREE_BUILD_MPV_PROBE=ON")
+    endif()
+    add_executable(listenfree-mpv-core-probe tools/mpv_core_probe.cpp)
+    target_include_directories(listenfree-mpv-core-probe PRIVATE ${LISTENFREE_MPV_ROOT}/include)
+    target_link_libraries(listenfree-mpv-core-probe PRIVATE
+        ${LISTENFREE_MPV_ROOT}/libmpv.dll.a Qt6::Core)
+    add_custom_command(TARGET listenfree-mpv-core-probe POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${LISTENFREE_MPV_ROOT}/libmpv-2.dll
+            $<TARGET_FILE_DIR:listenfree-mpv-core-probe>/libmpv-2.dll)
+endif()
 
 add_library(listenfree_source_client STATIC
     src/sourcehost/sourcehost_client.h
