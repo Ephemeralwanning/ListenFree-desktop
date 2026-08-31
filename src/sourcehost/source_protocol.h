@@ -13,6 +13,8 @@ enum class MessageType {
     UnloadPlugin,
     Initialize,
     ResolveMusicUrl,
+    ResolveLyric,
+    ResolvePic,
     Search,
     GetPlaylist,
     GetChart,

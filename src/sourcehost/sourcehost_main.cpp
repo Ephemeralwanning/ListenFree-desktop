@@ -80,7 +80,10 @@ int main(int argc, char* argv[]) {
         if (request.type == listenfree::sourcehost::MessageType::LoadPlugin ||
             request.type == listenfree::sourcehost::MessageType::UnloadPlugin ||
             request.type == listenfree::sourcehost::MessageType::Initialize ||
-            request.type == listenfree::sourcehost::MessageType::ResolveMusicUrl) {
+            request.type == listenfree::sourcehost::MessageType::ResolveMusicUrl ||
+            request.type == listenfree::sourcehost::MessageType::ResolveLyric ||
+            request.type == listenfree::sourcehost::MessageType::ResolvePic ||
+            request.type == listenfree::sourcehost::MessageType::Cancel) {
             pluginRuntime.handle(request);
             return;
         }

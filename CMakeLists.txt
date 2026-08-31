@@ -15,6 +15,7 @@ set(LISTENFREE_MPV_ROOT "" CACHE PATH "Root of an extracted libmpv development p
 
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core Gui Qml Quick Sql Multimedia Network Concurrent Test)
 find_package(TagLib 2.3.1 CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
 qt_standard_project_setup(REQUIRES 6.11)
 
 add_library(listenfree_domain INTERFACE)
@@ -67,7 +68,7 @@ add_library(listenfree_plugin_runtime STATIC
     src/sourcehost/plugin_runtime.h
     src/sourcehost/plugin_runtime.cpp
 )
-target_link_libraries(listenfree_plugin_runtime PUBLIC listenfree_source_protocol Qt6::Core Qt6::Qml)
+target_link_libraries(listenfree_plugin_runtime PUBLIC listenfree_source_protocol Qt6::Core Qt6::Qml Qt6::Network ZLIB::ZLIB)
 target_include_directories(listenfree_plugin_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_executable(listenfree-sourcehost src/sourcehost/sourcehost_main.cpp)
@@ -130,7 +131,7 @@ target_link_libraries(listenfree PRIVATE listenfree_qmlbridge Qt6::Gui Qt6::Quic
 if(LISTENFREE_BUILD_TESTS)
     enable_testing()
     add_executable(listenfree_tests tests/backend_tests.cpp)
-    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client TagLib::tag Qt6::Test Qt6::Sql)
+    target_link_libraries(listenfree_tests PRIVATE listenfree_qmlbridge listenfree_source_protocol listenfree_source_client TagLib::tag Qt6::Test Qt6::Sql Qt6::Network)
     target_include_directories(listenfree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME listenfree_tests COMMAND listenfree_tests)
     add_executable(listenfree_playback_tests tests/playback_tests.cpp)

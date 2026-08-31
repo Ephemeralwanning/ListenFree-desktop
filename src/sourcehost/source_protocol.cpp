@@ -15,6 +15,8 @@ QString SourceProtocol::typeName(MessageType type) {
     case MessageType::UnloadPlugin: return QStringLiteral("unloadPlugin");
     case MessageType::Initialize: return QStringLiteral("initialize");
     case MessageType::ResolveMusicUrl: return QStringLiteral("resolveMusicUrl");
+    case MessageType::ResolveLyric: return QStringLiteral("resolveLyric");
+    case MessageType::ResolvePic: return QStringLiteral("resolvePic");
     case MessageType::Search: return QStringLiteral("search");
     case MessageType::GetPlaylist: return QStringLiteral("getPlaylist");
     case MessageType::GetChart: return QStringLiteral("getChart");
@@ -30,7 +32,8 @@ QString SourceProtocol::typeName(MessageType type) {
 bool SourceProtocol::typeFromName(const QString& name, MessageType& type) {
     const QList<MessageType> types{
         MessageType::Hello, MessageType::HelloAck, MessageType::LoadPlugin, MessageType::UnloadPlugin,
-        MessageType::Initialize, MessageType::ResolveMusicUrl, MessageType::Search, MessageType::GetPlaylist,
+        MessageType::Initialize, MessageType::ResolveMusicUrl, MessageType::ResolveLyric, MessageType::ResolvePic,
+        MessageType::Search, MessageType::GetPlaylist,
         MessageType::GetChart, MessageType::Cancel, MessageType::Result, MessageType::Error, MessageType::Log,
         MessageType::Shutdown};
     for (const auto candidate : types) {

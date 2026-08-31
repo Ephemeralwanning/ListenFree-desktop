@@ -15,6 +15,8 @@
 #include <QFile>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QtTest>
@@ -107,6 +109,9 @@ private slots:
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
+    void sourceHostLoadsCompressedPlugin();
+    void sourceHostResolvesLyricAndPic();
+    void sourceHostProvidesAsyncRequestBridge();
     void sourceHostRequestTimeout();
     void sourceHostCancelIsTerminal();
     void sourceHostStopCompletesPendingRequests();
@@ -890,6 +895,213 @@ lx.send(lx.EVENT_NAMES.inited, {
     QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
     QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
              listenfree::sourcehost::SourceHostClient::RequestTerminal::RemoteError);
+    client.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void BackendTests::sourceHostLoadsCompressedPlugin() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    QVERIFY(QFileInfo::exists(executable));
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const QByteArray source = R"JS(/*
+ * @name Compressed source
+ * @description compressed contract fixture
+ * @version 1.0.0
+ * @author ListenFree
+ */
+if (lx.currentScriptInfo.name !== 'Compressed source' || lx.currentScriptInfo.version !== '1.0.0') {
+    throw new Error('metadata was not decoded')
+}
+lx.send(lx.EVENT_NAMES.inited, {
+    status: true,
+    sources: { kw: { type: 'music', actions: ['musicUrl'], qualitys: ['320k'] } }
+})
+)JS";
+    // qCompress uses the same zlib stream format as the legacy Node zlib.deflate
+    // helper; its four-byte Qt size prefix is not part of the stored payload.
+    const QByteArray encoded = QByteArrayLiteral("gz_") + qCompress(source, 9).mid(4).toBase64();
+    QFile plugin(temp.filePath(QStringLiteral("compressed-source.js")));
+    QVERIFY(plugin.open(QIODevice::WriteOnly));
+    QCOMPARE(plugin.write(encoded), encoded.size());
+    plugin.close();
+
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    listenfree::sourcehost::SourceMessage lastMessage;
+    connect(&client, &listenfree::sourcehost::SourceHostClient::messageReceived, &client,
+            [&](const listenfree::sourcehost::SourceMessage& message) { lastMessage = message; });
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
+    listenfree::sourcehost::SourceMessage load;
+    load.type = listenfree::sourcehost::MessageType::LoadPlugin;
+    load.requestId = QStringLiteral("compressed-load");
+    load.payload.insert(QStringLiteral("path"), plugin.fileName());
+    QVERIFY(client.request(load, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("sources")).toObject().value(QStringLiteral("kw"))
+                 .toObject().value(QStringLiteral("qualitys")).toArray().size(), 1);
+    client.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void BackendTests::sourceHostResolvesLyricAndPic() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    QVERIFY(QFileInfo::exists(executable));
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    QFile plugin(temp.filePath(QStringLiteral("lyric-pic-source.js")));
+    QVERIFY(plugin.open(QIODevice::WriteOnly | QIODevice::Text));
+    QVERIFY(plugin.write(R"JS(
+lx.on(lx.EVENT_NAMES.request, ({ action }) => {
+    if (action === 'lyric') return Promise.resolve({ lyric: '[00:01.00]hello', tlyric: '你好', rlyric: 'romaji', lxlyric: 'extra' })
+    if (action === 'pic') return Promise.resolve('https://media.invalid/cover.jpg')
+    return Promise.reject(new Error('unsupported'))
+})
+lx.send(lx.EVENT_NAMES.inited, {
+    status: true,
+    sources: { local: { type: 'music', actions: ['musicUrl', 'lyric', 'pic'], qualitys: [] } }
+})
+)JS"));
+    plugin.close();
+
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    listenfree::sourcehost::SourceMessage lastMessage;
+    connect(&client, &listenfree::sourcehost::SourceHostClient::messageReceived, &client,
+            [&](const listenfree::sourcehost::SourceMessage& message) { lastMessage = message; });
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
+    listenfree::sourcehost::SourceMessage load;
+    load.type = listenfree::sourcehost::MessageType::LoadPlugin;
+    load.requestId = QStringLiteral("lyric-pic-load");
+    load.payload.insert(QStringLiteral("path"), plugin.fileName());
+    QVERIFY(client.request(load, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+
+    listenfree::sourcehost::SourceMessage lyric;
+    lyric.type = listenfree::sourcehost::MessageType::ResolveLyric;
+    lyric.requestId = QStringLiteral("lyric-request");
+    lyric.payload.insert(QStringLiteral("source"), QStringLiteral("local"));
+    lyric.payload.insert(QStringLiteral("musicInfo"), QJsonObject{{QStringLiteral("id"), QStringLiteral("song-2")}});
+    QVERIFY(client.request(lyric, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("data")).toObject().value(QStringLiteral("lyric")).toString(),
+             QStringLiteral("[00:01.00]hello"));
+
+    listenfree::sourcehost::SourceMessage pic;
+    pic.type = listenfree::sourcehost::MessageType::ResolvePic;
+    pic.requestId = QStringLiteral("pic-request");
+    pic.payload.insert(QStringLiteral("source"), QStringLiteral("local"));
+    pic.payload.insert(QStringLiteral("musicInfo"), QJsonObject{{QStringLiteral("id"), QStringLiteral("song-2")}});
+    QVERIFY(client.request(pic, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("data")).toString(),
+             QStringLiteral("https://media.invalid/cover.jpg"));
+    client.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void BackendTests::sourceHostProvidesAsyncRequestBridge() {
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    QVERIFY(QFileInfo::exists(executable));
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    bool hangingRequest = false;
+    connect(&server, &QTcpServer::newConnection, &server, [&server, &hangingRequest] {
+        while (server.hasPendingConnections()) {
+            QTcpSocket* socket = server.nextPendingConnection();
+            connect(socket, &QTcpSocket::readyRead, socket, [socket, &hangingRequest] {
+                const QByteArray request = socket->readAll();
+                if (!request.contains("\r\n\r\n")) return;
+                if (request.contains("/hang")) {
+                    hangingRequest = true;
+                    return;
+                }
+                const QByteArray body = R"({"url":"https://media.invalid/from-request.mp3"})";
+                const QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                                             QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                socket->write(response);
+                socket->disconnectFromHost();
+            });
+        }
+    });
+
+    const QString script = QStringLiteral(R"JS(
+lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
+    if (action !== 'musicUrl') return Promise.reject(new Error('unsupported action'))
+    return new Promise((resolve, reject) => {
+        const endpoint = info.musicInfo.id === 'cancel' ? '/hang' : ''
+        lx.request('http://127.0.0.1:%1' + endpoint, { method: 'get', timeout: 2000 }, (error, response, body) => {
+            if (error) return reject(error)
+            if (!response || !body || body.url === undefined) return reject(new Error('bad response'))
+            resolve(body.url)
+        })
+    })
+})
+lx.send(lx.EVENT_NAMES.inited, {
+    status: true,
+    sources: { kw: { type: 'music', actions: ['musicUrl'], qualitys: ['320k'] } }
+})
+)JS").arg(server.serverPort());
+    QFile plugin(temp.filePath(QStringLiteral("request-source.js")));
+    QVERIFY(plugin.open(QIODevice::WriteOnly | QIODevice::Text));
+    const QByteArray scriptBytes = script.toUtf8();
+    QCOMPARE(plugin.write(scriptBytes), scriptBytes.size());
+    plugin.close();
+
+    listenfree::sourcehost::SourceHostClient client(executable);
+    QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
+    QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    listenfree::sourcehost::SourceMessage lastMessage;
+    connect(&client, &listenfree::sourcehost::SourceHostClient::messageReceived, &client,
+            [&](const listenfree::sourcehost::SourceMessage& message) { lastMessage = message; });
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
+    listenfree::sourcehost::SourceMessage load;
+    load.type = listenfree::sourcehost::MessageType::LoadPlugin;
+    load.requestId = QStringLiteral("request-load");
+    load.payload.insert(QStringLiteral("path"), plugin.fileName());
+    QVERIFY(client.request(load, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+
+    listenfree::sourcehost::SourceMessage resolve;
+    resolve.type = listenfree::sourcehost::MessageType::ResolveMusicUrl;
+    resolve.requestId = QStringLiteral("request-resolve");
+    resolve.payload.insert(QStringLiteral("source"), QStringLiteral("kw"));
+    resolve.payload.insert(QStringLiteral("type"), QStringLiteral("320k"));
+    resolve.payload.insert(QStringLiteral("musicInfo"), QJsonObject{{QStringLiteral("id"), QStringLiteral("song-3")}});
+    QVERIFY(client.request(resolve, 3000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 2500);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("data")).toObject().value(QStringLiteral("url")).toString(),
+             QStringLiteral("https://media.invalid/from-request.mp3"));
+
+    listenfree::sourcehost::SourceMessage cancelResolve = resolve;
+    cancelResolve.requestId = QStringLiteral("request-cancel");
+    cancelResolve.payload.insert(QStringLiteral("musicInfo"), QJsonObject{{QStringLiteral("id"), QStringLiteral("cancel")}});
+    QVERIFY(client.request(cancelResolve, 3000));
+    QTRY_VERIFY_WITH_TIMEOUT(hangingRequest, 1000);
+    client.cancel("request-cancel");
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Cancelled);
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
 }
