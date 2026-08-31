@@ -12,3 +12,8 @@
 # Local profiling and installer logs
 *.log
 *.trace
+
+# Local Codex planning and implementation notes (keep outside GitHub)
+/AGENTS.md
+/docs/design/
+/docs/implementation/
