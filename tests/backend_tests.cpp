@@ -1043,12 +1043,21 @@ void BackendTests::sourceHostProvidesAsyncRequestBridge() {
     const QString script = QStringLiteral(R"JS(
 lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
     if (action !== 'musicUrl') return Promise.reject(new Error('unsupported action'))
-    return new Promise((resolve, reject) => {
-        const endpoint = info.musicInfo.id === 'cancel' ? '/hang' : ''
-        lx.request('http://127.0.0.1:%1' + endpoint, { method: 'get', timeout: 2000 }, (error, response, body) => {
-            if (error) return reject(error)
-            if (!response || !body || body.url === undefined) return reject(new Error('bad response'))
-            resolve(body.url)
+    const input = lx.utils.buffer.from('contract')
+    if (lx.utils.crypto.md5('contract') !== '800c327aefb3f9241513cbf551abbfda') {
+        return Promise.reject(new Error('md5 bridge failed'))
+    }
+    const encrypted = lx.utils.crypto.aesEncrypt(input, 'aes-128-cbc', lx.utils.crypto.randomBytes(16), lx.utils.crypto.randomBytes(16))
+    if (!encrypted || encrypted.length !== 16) return Promise.reject(new Error('aes bridge failed'))
+    return lx.utils.zlib.deflate(input).then(compressed => lx.utils.zlib.inflate(compressed)).then(roundtrip => {
+        if (lx.utils.buffer.bufToString(roundtrip) !== 'contract') throw new Error('zlib bridge failed')
+        return new Promise((resolve, reject) => {
+            const endpoint = info.musicInfo.id === 'cancel' ? '/hang' : ''
+            lx.request('http://127.0.0.1:%1' + endpoint, { method: 'get', timeout: 2000 }, (error, response, body) => {
+                if (error) return reject(error)
+                if (!response || !body || body.url === undefined) return reject(new Error('bad response'))
+                resolve(body.url)
+            })
         })
     })
 })

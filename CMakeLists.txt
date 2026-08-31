@@ -70,6 +70,9 @@ add_library(listenfree_plugin_runtime STATIC
 )
 target_link_libraries(listenfree_plugin_runtime PUBLIC listenfree_source_protocol Qt6::Core Qt6::Qml Qt6::Network ZLIB::ZLIB)
 target_include_directories(listenfree_plugin_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(WIN32)
+    target_link_libraries(listenfree_plugin_runtime PRIVATE bcrypt)
+endif()
 
 add_executable(listenfree-sourcehost src/sourcehost/sourcehost_main.cpp)
 target_link_libraries(listenfree-sourcehost PRIVATE listenfree_plugin_runtime Qt6::Core)

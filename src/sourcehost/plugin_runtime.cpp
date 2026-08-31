@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QJSEngine>
 #include <QJSValue>
 #include <QJsonDocument>
@@ -13,15 +14,23 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QRandomGenerator>
+#include <QScopeGuard>
 #include <QSet>
 #include <QUrl>
 #include <QUrlQuery>
 
 #include <zlib.h>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <bcrypt.h>
+#endif
+
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace listenfree::sourcehost {
 
@@ -32,6 +41,10 @@ constexpr qsizetype MaxPendingPluginRequests = 256;
 constexpr qsizetype MaxUrlBytes = 2048;
 constexpr qsizetype MaxPendingNetworkRequests = 64;
 constexpr qsizetype MaxNetworkResponseBytes = 8 * 1024 * 1024;
+
+#ifdef Q_OS_WIN
+QByteArray aesEncryptBytes(const QByteArray& input, const QByteArray& key, const QByteArray& iv, const QString& mode);
+#endif
 
 QString scriptError(const QJSValue& value) {
     QString result = value.toString();
@@ -61,6 +74,101 @@ public:
 
     Q_INVOKABLE void abortRequest(const QString& requestId) {
         emit requestAborted(requestId);
+    }
+
+    Q_INVOKABLE QString bufferFromString(const QString& value, const QString& encoding) const {
+        if (encoding.compare(QStringLiteral("base64"), Qt::CaseInsensitive) == 0) {
+            return QString::fromLatin1(QByteArray::fromBase64(value.toLatin1()).toBase64());
+        }
+        if (encoding.compare(QStringLiteral("hex"), Qt::CaseInsensitive) == 0) {
+            return QString::fromLatin1(QByteArray::fromHex(value.toLatin1()).toBase64());
+        }
+        return QString::fromLatin1(value.toUtf8().toBase64());
+    }
+
+    Q_INVOKABLE QString bufferToString(const QString& base64, const QString& encoding) const {
+        const QByteArray bytes = QByteArray::fromBase64(base64.toLatin1());
+        if (encoding.compare(QStringLiteral("base64"), Qt::CaseInsensitive) == 0) {
+            return QString::fromLatin1(bytes.toBase64());
+        }
+        if (encoding.compare(QStringLiteral("hex"), Qt::CaseInsensitive) == 0) {
+            return QString::fromLatin1(bytes.toHex());
+        }
+        return QString::fromUtf8(bytes);
+    }
+
+    Q_INVOKABLE QString bufferConcat(const QStringList& values) const {
+        QByteArray result;
+        for (const auto& value : values) result.append(QByteArray::fromBase64(value.toLatin1()));
+        return QString::fromLatin1(result.toBase64());
+    }
+
+    Q_INVOKABLE int bufferLength(const QString& base64) const {
+        return QByteArray::fromBase64(base64.toLatin1()).size();
+    }
+
+    Q_INVOKABLE QString md5(const QString& value) const {
+        return QString::fromLatin1(QCryptographicHash::hash(value.toUtf8(), QCryptographicHash::Md5).toHex());
+    }
+
+    Q_INVOKABLE QString aesEncrypt(const QString& inputBase64, const QString& mode,
+                                   const QString& keyBase64, const QString& ivBase64) const {
+#ifdef Q_OS_WIN
+        const QByteArray encrypted = aesEncryptBytes(QByteArray::fromBase64(inputBase64.toLatin1()),
+                                                     QByteArray::fromBase64(keyBase64.toLatin1()),
+                                                     QByteArray::fromBase64(ivBase64.toLatin1()), mode);
+        return encrypted.isEmpty() ? QString() : QString::fromLatin1(encrypted.toBase64());
+#else
+        Q_UNUSED(inputBase64);
+        Q_UNUSED(mode);
+        Q_UNUSED(keyBase64);
+        Q_UNUSED(ivBase64);
+        return {};
+#endif
+    }
+
+    Q_INVOKABLE QString randomBytes(int size) const {
+        if (size < 0 || size > 1024 * 1024) return {};
+        QByteArray bytes(size, Qt::Uninitialized);
+        for (int i = 0; i < size; ++i) {
+            bytes[i] = static_cast<char>(QRandomGenerator::global()->generate() & 0xffU);
+        }
+        return QString::fromLatin1(bytes.toBase64());
+    }
+
+    Q_INVOKABLE QString zeroBytes(int size) const {
+        if (size < 0 || size > 1024 * 1024) return {};
+        return QString::fromLatin1(QByteArray(size, '\0').toBase64());
+    }
+
+    Q_INVOKABLE QString deflate(const QString& base64) const {
+        const QByteArray input = QByteArray::fromBase64(base64.toLatin1());
+        uLongf outputSize = ::compressBound(static_cast<uLong>(input.size()));
+        QByteArray output(static_cast<qsizetype>(outputSize), Qt::Uninitialized);
+        if (::compress2(reinterpret_cast<Bytef*>(output.data()), &outputSize,
+                        reinterpret_cast<const Bytef*>(input.constData()),
+                        static_cast<uLong>(input.size()), Z_DEFAULT_COMPRESSION) != Z_OK) return {};
+        output.resize(static_cast<qsizetype>(outputSize));
+        return QString::fromLatin1(output.toBase64());
+    }
+
+    Q_INVOKABLE QString inflate(const QString& base64) const {
+        const QByteArray input = QByteArray::fromBase64(base64.toLatin1());
+        uLongf outputSize = 64U * 1024U;
+        while (outputSize <= static_cast<uLong>(MaxPluginBytes)) {
+            QByteArray output(static_cast<qsizetype>(outputSize), Qt::Uninitialized);
+            uLongf actualSize = outputSize;
+            const int result = ::uncompress(reinterpret_cast<Bytef*>(output.data()), &actualSize,
+                                             reinterpret_cast<const Bytef*>(input.constData()),
+                                             static_cast<uLong>(input.size()));
+            if (result == Z_OK) {
+                output.resize(static_cast<qsizetype>(actualSize));
+                return QString::fromLatin1(output.toBase64());
+            }
+            if (result != Z_BUF_ERROR || outputSize == static_cast<uLong>(MaxPluginBytes)) break;
+            outputSize = qMin(static_cast<uLong>(MaxPluginBytes), outputSize * 2U);
+        }
+        return {};
     }
 
 signals:
@@ -116,6 +224,64 @@ const QString bootstrapScript = QStringLiteral(R"JS(
     }
     root.__lf_request_sequence = 0
     root.__lf_request_callbacks = Object.create(null)
+    function LFBuffer(base64) {
+        this.__lf_base64 = base64 || ''
+        this.length = __lf_bridge.bufferLength(this.__lf_base64)
+    }
+    LFBuffer.prototype.toString = function (encoding) {
+        return __lf_bridge.bufferToString(this.__lf_base64, encoding || 'utf8')
+    }
+    root.Buffer = {
+        from(value, encoding) {
+            if (value && typeof value.__lf_base64 === 'string') return new LFBuffer(value.__lf_base64)
+            if (typeof value === 'string') return new LFBuffer(__lf_bridge.bufferFromString(value, encoding || 'utf8'))
+            if (Array.isArray(value)) return new LFBuffer(__lf_bridge.bufferFromString(String.fromCharCode(...value), 'binary'))
+            throw new Error('unsupported Buffer.from input')
+        },
+        alloc(size) {
+            if (!Number.isInteger(size) || size < 0 || size > 1048576) throw new Error('invalid buffer size')
+            return new LFBuffer(__lf_bridge.zeroBytes(size))
+        },
+        concat(values) {
+            if (!Array.isArray(values)) throw new Error('Buffer.concat expects an array')
+            return new LFBuffer(__lf_bridge.bufferConcat(values.map(value => value.__lf_base64 || '')))
+        }
+    }
+    root.lx.utils = {
+        crypto: {
+            md5(value) { return __lf_bridge.md5(String(value)) },
+            randomBytes(size) { return new LFBuffer(__lf_bridge.randomBytes(size)) },
+            aesEncrypt(value, mode, key, iv) {
+                if (!value || !key || !iv || typeof value.__lf_base64 !== 'string' ||
+                    typeof key.__lf_base64 !== 'string' || typeof iv.__lf_base64 !== 'string') {
+                    throw new Error('invalid AES arguments')
+                }
+                const result = __lf_bridge.aesEncrypt(value.__lf_base64, mode, key.__lf_base64, iv.__lf_base64)
+                if (!result) throw new Error('aesEncrypt failed')
+                return new LFBuffer(result)
+            },
+            rsaEncrypt() { throw new Error('rsaEncrypt is not available in this runtime') }
+        },
+        buffer: {
+            from(value, encoding) { return root.Buffer.from(value, encoding) },
+            bufToString(value, encoding) {
+                if (!value || typeof value.__lf_base64 !== 'string') throw new Error('invalid buffer')
+                return value.toString(encoding || 'utf8')
+            }
+        },
+        zlib: {
+            inflate(value) {
+                if (!value || typeof value.__lf_base64 !== 'string') return Promise.reject(new Error('invalid buffer'))
+                const result = __lf_bridge.inflate(value.__lf_base64)
+                return result ? Promise.resolve(new LFBuffer(result)) : Promise.reject(new Error('inflate failed'))
+            },
+            deflate(value) {
+                if (!value || typeof value.__lf_base64 !== 'string') return Promise.reject(new Error('invalid buffer'))
+                const result = __lf_bridge.deflate(value.__lf_base64)
+                return result ? Promise.resolve(new LFBuffer(result)) : Promise.reject(new Error('deflate failed'))
+            }
+        }
+    }
     root.__lf_request_complete = function (requestId, error, packetJson) {
         const callback = root.__lf_request_callbacks[requestId]
         delete root.__lf_request_callbacks[requestId]
@@ -128,6 +294,9 @@ const QString bootstrapScript = QStringLiteral(R"JS(
         try { packet = JSON.parse(packetJson) } catch (parseError) {
             callback(parseError, null, null)
             return false
+        }
+        if (packet.response && packet.response.rawBase64) {
+            packet.response.raw = root.Buffer.from(packet.response.rawBase64, 'base64')
         }
         callback(null, packet.response || null, packet.body)
         return true
@@ -166,6 +335,49 @@ bool containsString(const QJsonArray& values, const QString& expected) {
     }
     return false;
 }
+
+#ifdef Q_OS_WIN
+QByteArray aesEncryptBytes(const QByteArray& input, const QByteArray& key, const QByteArray& iv, const QString& mode) {
+    const bool ecb = mode.endsWith(QStringLiteral("-ecb"));
+    const bool validMode = mode == QStringLiteral("aes-128-cbc") || mode == QStringLiteral("aes-192-cbc") ||
+                           mode == QStringLiteral("aes-256-cbc") || mode == QStringLiteral("aes-128-ecb") ||
+                           mode == QStringLiteral("aes-192-ecb") || mode == QStringLiteral("aes-256-ecb");
+    const bool validKey = (mode.contains(QStringLiteral("128")) && key.size() == 16) ||
+                          (mode.contains(QStringLiteral("192")) && key.size() == 24) ||
+                          (mode.contains(QStringLiteral("256")) && key.size() == 32);
+    if (!validMode || !validKey || (!ecb && iv.size() != 16)) return {};
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_AES_ALGORITHM, nullptr, 0) != 0) return {};
+    const auto closeAlgorithm = qScopeGuard([&] { BCryptCloseAlgorithmProvider(algorithm, 0); });
+    const wchar_t* chaining = ecb ? BCRYPT_CHAIN_MODE_ECB : BCRYPT_CHAIN_MODE_CBC;
+    if (BCryptSetProperty(algorithm, BCRYPT_CHAINING_MODE, reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(chaining)),
+                          static_cast<ULONG>((wcslen(chaining) + 1) * sizeof(wchar_t)), 0) != 0) return {};
+    DWORD objectLength = 0;
+    DWORD resultLength = 0;
+    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength),
+                          &resultLength, 0) != 0) return {};
+    std::vector<UCHAR> object(objectLength);
+    BCRYPT_KEY_HANDLE handle = nullptr;
+    if (BCryptGenerateSymmetricKey(algorithm, &handle, object.data(), objectLength,
+                                   reinterpret_cast<PUCHAR>(const_cast<char*>(key.constData())),
+                                   static_cast<ULONG>(key.size()), 0) != 0) return {};
+    const auto destroyKey = qScopeGuard([&] { BCryptDestroyKey(handle); });
+    QByteArray mutableIv = iv;
+    ULONG outputLength = 0;
+    const auto inputData = reinterpret_cast<PUCHAR>(const_cast<char*>(input.constData()));
+    const auto ivData = mutableIv.isEmpty() ? nullptr : reinterpret_cast<PUCHAR>(mutableIv.data());
+    if (BCryptEncrypt(handle, inputData, static_cast<ULONG>(input.size()), nullptr, ivData,
+                      static_cast<ULONG>(mutableIv.size()), nullptr, 0, &outputLength, BCRYPT_BLOCK_PADDING) != 0) return {};
+    QByteArray output(static_cast<qsizetype>(outputLength), Qt::Uninitialized);
+    mutableIv = iv;
+    if (BCryptEncrypt(handle, inputData, static_cast<ULONG>(input.size()), nullptr,
+                      mutableIv.isEmpty() ? nullptr : reinterpret_cast<PUCHAR>(mutableIv.data()),
+                      static_cast<ULONG>(mutableIv.size()), reinterpret_cast<PUCHAR>(output.data()), outputLength,
+                      &outputLength, BCRYPT_BLOCK_PADDING) != 0) return {};
+    output.resize(static_cast<qsizetype>(outputLength));
+    return output;
+}
+#endif
 
 std::optional<QByteArray> decodePluginSource(const QByteArray& encoded, QString* error) {
     if (!encoded.startsWith("gz_")) return encoded;
