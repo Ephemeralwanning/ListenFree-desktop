@@ -290,7 +290,13 @@ bool SourceHostClient::loadPlugin(const std::filesystem::path& path) {
     SourceMessage message;
     message.type = MessageType::LoadPlugin;
     message.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+#ifdef Q_OS_WIN
+    // std::filesystem::path stores native UTF-16 on Windows; converting through
+    // path::string() can lose non-ASCII plugin paths under the active code page.
+    message.payload.insert(QStringLiteral("path"), QString::fromStdWString(path.wstring()));
+#else
     message.payload.insert(QStringLiteral("path"), QString::fromStdString(path.string()));
+#endif
     return request(message, 5000);
 }
 

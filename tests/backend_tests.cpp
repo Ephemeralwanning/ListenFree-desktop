@@ -817,17 +817,79 @@ void BackendTests::sourceProtocolRejectsInvalidFrame() {
 void BackendTests::sourceHostProcessLifecycle() {
     const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
     QVERIFY(QFileInfo::exists(executable));
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    QFile plugin(temp.filePath(QStringLiteral("mock-source.js")));
+    QVERIFY(plugin.open(QIODevice::WriteOnly | QIODevice::Text));
+    QVERIFY(plugin.write(R"JS(
+lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
+    if (action !== 'musicUrl') return Promise.reject(new Error('unsupported action'))
+    return Promise.resolve('https://media.invalid/' + source + '/' + info.type + '/' + info.musicInfo.id + '.mp3')
+})
+lx.send(lx.EVENT_NAMES.inited, {
+    status: true,
+    sources: { kw: { type: 'music', actions: ['musicUrl'], qualitys: ['320k'] } }
+})
+)JS"));
+    plugin.close();
+
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
+    listenfree::sourcehost::SourceMessage lastMessage;
+    connect(&client, &listenfree::sourcehost::SourceHostClient::messageReceived, &client,
+            [&](const listenfree::sourcehost::SourceMessage& message) { lastMessage = message; });
     QVERIFY(client.start());
     QVERIFY(client.running());
     QCOMPARE(readySpy.count(), 0);
     QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 2000);
-    QVERIFY(client.loadPlugin(std::filesystem::path("mock-source.js")));
+    listenfree::sourcehost::SourceMessage load;
+    load.type = listenfree::sourcehost::MessageType::LoadPlugin;
+    load.requestId = QStringLiteral("plugin-load");
+    load.payload.insert(QStringLiteral("path"), plugin.fileName());
+    QVERIFY(client.request(load, 2000));
     QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
     QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
              listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.type, listenfree::sourcehost::MessageType::Result);
+
+    listenfree::sourcehost::SourceMessage initialize;
+    initialize.type = listenfree::sourcehost::MessageType::Initialize;
+    initialize.requestId = QStringLiteral("plugin-init");
+    QVERIFY(client.request(initialize, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("sources")).toObject().value(QStringLiteral("kw"))
+                 .toObject().value(QStringLiteral("type")).toString(), QStringLiteral("music"));
+
+    listenfree::sourcehost::SourceMessage resolve;
+    resolve.type = listenfree::sourcehost::MessageType::ResolveMusicUrl;
+    resolve.requestId = QStringLiteral("plugin-resolve");
+    resolve.payload.insert(QStringLiteral("source"), QStringLiteral("kw"));
+    resolve.payload.insert(QStringLiteral("type"), QStringLiteral("320k"));
+    resolve.payload.insert(QStringLiteral("musicInfo"),
+                           QJsonObject{{QStringLiteral("id"), QStringLiteral("song-1")}});
+    QVERIFY(client.request(resolve, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("data")).toObject().value(QStringLiteral("url")).toString(),
+             QStringLiteral("https://media.invalid/kw/320k/song-1.mp3"));
+
+    listenfree::sourcehost::SourceMessage unload;
+    unload.type = listenfree::sourcehost::MessageType::UnloadPlugin;
+    unload.requestId = QStringLiteral("plugin-unload");
+    QVERIFY(client.request(unload, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    listenfree::sourcehost::SourceMessage afterUnload = resolve;
+    afterUnload.requestId = QStringLiteral("plugin-after-unload");
+    QVERIFY(client.request(afterUnload, 2000));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
+    QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+             listenfree::sourcehost::SourceHostClient::RequestTerminal::RemoteError);
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
 }

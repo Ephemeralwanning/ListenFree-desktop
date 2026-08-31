@@ -63,8 +63,15 @@ add_library(listenfree_source_protocol STATIC
 target_link_libraries(listenfree_source_protocol PUBLIC Qt6::Core)
 target_include_directories(listenfree_source_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+add_library(listenfree_plugin_runtime STATIC
+    src/sourcehost/plugin_runtime.h
+    src/sourcehost/plugin_runtime.cpp
+)
+target_link_libraries(listenfree_plugin_runtime PUBLIC listenfree_source_protocol Qt6::Core Qt6::Qml)
+target_include_directories(listenfree_plugin_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 add_executable(listenfree-sourcehost src/sourcehost/sourcehost_main.cpp)
-target_link_libraries(listenfree-sourcehost PRIVATE listenfree_source_protocol Qt6::Core)
+target_link_libraries(listenfree-sourcehost PRIVATE listenfree_plugin_runtime Qt6::Core)
 
 # Local-only, non-destructive scanner experiment. It defaults to an in-memory
 # database and is intentionally separate from the GUI executable.

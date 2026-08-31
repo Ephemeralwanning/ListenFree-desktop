@@ -1,4 +1,5 @@
 #include "sourcehost/source_protocol.h"
+#include "sourcehost/plugin_runtime.h"
 
 #include <QCoreApplication>
 #include <QMetaObject>
@@ -60,13 +61,27 @@ private:
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
+    listenfree::sourcehost::PluginRuntime pluginRuntime;
+    QObject::connect(&pluginRuntime, &listenfree::sourcehost::PluginRuntime::responseReady, &app,
+                     [](const listenfree::sourcehost::SourceMessage& response) {
+                         const QByteArray encoded = listenfree::sourcehost::SourceProtocol::encode(response);
+                         std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
+                         std::cout.flush();
+                     });
 
-    StdinReader reader([&app](QByteArray frame) {
+    StdinReader reader([&app, &pluginRuntime](QByteArray frame) {
         listenfree::sourcehost::SourceMessage request;
         QString error;
         if (!listenfree::sourcehost::SourceProtocol::decode(frame, request, &error)) return;
         if (request.type == listenfree::sourcehost::MessageType::Shutdown) {
             app.quit();
+            return;
+        }
+        if (request.type == listenfree::sourcehost::MessageType::LoadPlugin ||
+            request.type == listenfree::sourcehost::MessageType::UnloadPlugin ||
+            request.type == listenfree::sourcehost::MessageType::Initialize ||
+            request.type == listenfree::sourcehost::MessageType::ResolveMusicUrl) {
+            pluginRuntime.handle(request);
             return;
         }
         listenfree::sourcehost::SourceMessage response;
