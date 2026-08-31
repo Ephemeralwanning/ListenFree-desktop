@@ -605,7 +605,8 @@ void BackendTests::sourceHostProcessLifecycle() {
 }
 
 void BackendTests::sourceHostRequestTimeout() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "hang");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QVERIFY(client.start());
@@ -624,10 +625,12 @@ void BackendTests::sourceHostRequestTimeout() {
     QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
              listenfree::sourcehost::SourceHostClient::RequestTerminal::TimedOut);
     client.stop();
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::sourceHostCancelIsTerminal() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "hang");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QSignalSpy timeoutSpy(&client, &listenfree::sourcehost::SourceHostClient::requestTimedOut);
@@ -650,10 +653,12 @@ void BackendTests::sourceHostCancelIsTerminal() {
     QCOMPARE(timeoutSpy.count(), 0);
     QCOMPARE(finishedSpy.count(), 0);
     client.stop();
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::sourceHostStopCompletesPendingRequests() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "hang");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
     QSignalSpy finishedSpy(&client, &listenfree::sourcehost::SourceHostClient::requestFinished);
@@ -676,10 +681,12 @@ void BackendTests::sourceHostStopCompletesPendingRequests() {
     }
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
     QCOMPARE(finishedSpy.count(), 2);
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::sourceHostCrashRecovery() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "crash");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy crashedSpy(&client, &listenfree::sourcehost::SourceHostClient::crashed);
     QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
@@ -695,10 +702,12 @@ void BackendTests::sourceHostCrashRecovery() {
     QTRY_COMPARE_WITH_TIMEOUT(restartedSpy.count(), 1, 3000);
     QVERIFY(client.running());
     client.stop();
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::sourceHostStopPreventsRestart() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "crash");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy crashedSpy(&client, &listenfree::sourcehost::SourceHostClient::crashed);
     QSignalSpy restartedSpy(&client, &listenfree::sourcehost::SourceHostClient::restarted);
@@ -716,10 +725,12 @@ void BackendTests::sourceHostStopPreventsRestart() {
     QTest::qWait(100);
     QCOMPARE(restartedSpy.count(), 0);
     QVERIFY(!client.running());
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::sourceHostBoundsPendingRequests() {
-    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe");
+    const QString executable = QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost-fault-host.exe");
+    qputenv("LISTENFREE_FAULT_MODE", "hang");
     listenfree::sourcehost::SourceHostClient client(executable);
     QSignalSpy protocolSpy(&client, &listenfree::sourcehost::SourceHostClient::protocolError);
     QSignalSpy readySpy(&client, &listenfree::sourcehost::SourceHostClient::ready);
@@ -741,6 +752,7 @@ void BackendTests::sourceHostBoundsPendingRequests() {
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QCOMPARE(client.findChildren<QTimer*>().size(), 0);
+    qunsetenv("LISTENFREE_FAULT_MODE");
 }
 
 void BackendTests::mockProvider() {

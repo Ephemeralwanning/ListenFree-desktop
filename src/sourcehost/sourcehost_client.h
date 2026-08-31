@@ -10,6 +10,8 @@
 #include <QObject>
 #include <QTimer>
 
+#include <memory>
+
 namespace listenfree::sourcehost {
 
 class SourceHostClient final : public QObject, public application::ISourceHostClient {
@@ -53,6 +55,17 @@ signals:
     void stateChanged(HostState state);
 
 private:
+#ifdef Q_OS_WIN
+    struct JobHandleDeleter {
+        void operator()(void* handle) const noexcept;
+    };
+    using JobHandle = std::unique_ptr<void, JobHandleDeleter>;
+
+    bool createJobObject();
+    bool assignProcessToJob();
+#endif
+    void terminateProcessTree() noexcept;
+    void closeJobObject() noexcept;
     void transitionTo(HostState state);
     void handleStandardOutput();
     void failHandshake(const QString& reason);
@@ -74,6 +87,9 @@ private:
     bool restartInProgress_{false};
     int restartAttempts_{0};
     HostState state_{HostState::Stopped};
+#ifdef Q_OS_WIN
+    JobHandle jobHandle_{nullptr};
+#endif
     static constexpr qsizetype MaxPendingRequests = 256;
 };
 

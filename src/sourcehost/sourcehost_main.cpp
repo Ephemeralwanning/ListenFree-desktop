@@ -5,7 +5,6 @@
 #include <QThread>
 
 #include <array>
-#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <utility>
@@ -70,8 +69,6 @@ int main(int argc, char* argv[]) {
             app.quit();
             return;
         }
-        if (request.payload.value(QStringLiteral("noReply")).toBool()) return;
-        if (request.payload.value(QStringLiteral("crash")).toBool()) std::abort();
         listenfree::sourcehost::SourceMessage response;
         response.type = request.type == listenfree::sourcehost::MessageType::Hello
                             ? listenfree::sourcehost::MessageType::HelloAck

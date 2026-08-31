@@ -89,3 +89,19 @@ The standalone `QMediaPlayer + QAudioOutput` reproducer gained 19–21 process h
 ### Upstream follow-up
 
 The repository no longer has an M2 blocker, but the Qt kit itself remains affected. Before adopting a newer Qt 6.11.x build, check for an equivalent upstream revert, remove this patch only when it is redundant, rebuild the overlay and rerun both full configurations. Do not apply both fixes or deploy the unpatched global DLL over the repository runtime.
+
+## BLK-004 — SourceHost child processes were not OS-managed
+
+- **Observed:** 2026-08-31 during M3 fault-matrix expansion.
+- **Affected milestone:** M3 SourceHost process-tree lifecycle.
+- **Status:** Resolved locally with per-launch Windows Job Objects and an independent fault Host.
+
+### Evidence
+
+The previous supervisor only terminated the root `QProcess`; a spawned child could outlive graceful-stop and forced-termination paths. There was also no isolated fault executable, so crash and hang injection lived in the production Host.
+
+### Recovery
+
+- `SourceHostClient` now owns a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object via `std::unique_ptr` custom deleter, assigns the host after `QProcess::started`, explicitly terminates the job on timeout/crash/finish/destructor, and closes it on every terminal path.
+- Fault injection moved to `listenfree-sourcehost-fault-host`; production `listenfree-sourcehost` handles only normal protocol behavior.
+- Fault tests cover startup/handshake, request/cancel/timeout, deterministic oversized-frame `WriteFailed`, crash/restart, graceful and forced stop, child-process cleanup, repeated lifecycle and timer cleanup. Debug/Release full CTest passes.

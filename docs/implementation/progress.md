@@ -4,7 +4,7 @@
 
 ## 总体判断
 
-- 已批准的 Backend Bootstrap：约 **64%**；
+- 已批准的 Backend Bootstrap：约 **67%**；
 - 面向最终可日用产品的整体工程：约 **30%–35%**；
 - M2 Playback Core 已完成全部当前门禁；M0、M1、M3、M4、M5 仍为部分完成。
 
@@ -13,7 +13,7 @@
 | M0 构建骨架 | 90% | Qt 6.11.2、CMake Presets、Debug/Release、QML Smoke CTest | 缺干净机与发布工具链验证 |
 | M1 领域/数据库/扫描 | 70% | SQLite CRUD/FK/回滚、TagLib、64 首有界批次、真实入库 | size+mtime 增量扫描、完整 repository、迁移 checksum、符号链接测试 |
 | M2 播放核心 | 100% | 生成 PCM WAV 与 loopback HTTP 的真实加载/播放/暂停/Seek/停止/结束测试；Mute/音量；格式与结构化错误；动态设备/capability；队列推进与歌词投影；媒体文件、MMCSS、进程和析构门禁；Debug/Release 各 4/4 CTest | 当前门禁无缺口；后续 FFmpeg + cubeb 可在相同窄接口后替换，但不是 M2 完成前置条件 |
-| M3 SourceHost | 68% | 独立进程、纯帧 Hello/HelloAck、1 MiB 帧限制、异步监督、统一请求终态、超时/取消/崩溃恢复、输入背压 | 真实插件运行时、进程树 Job Object、独立故障测试 Host |
+| M3 SourceHost | 82% | 独立进程、纯帧 Hello/HelloAck、1 MiB 帧限制、异步监督、统一请求终态、超时/取消/崩溃恢复、输入背压、Windows Job Object 进程树托管、独立故障测试 Host 与 Debug/Release 故障门禁 | 真实插件运行时、生产插件契约兼容率 |
 | M4 在线/QML 门面 | 40% | Mock Provider、列表模型、App/Library/Player Controller | 设置/歌单/在线控制器闭环、网易云可替换适配器、QML 自动化 Smoke |
 | M5 验证/文档 | 20% | 双配置构建、CTest、依赖/决策/基线文档 | 三次性能样本、播放/SourceHost 进程树、MSVC/安装器、完整风险收口 |
 
@@ -28,8 +28,14 @@
 
 ## 当前推进顺序
 
-1. 收口 SourceHost 测试 Host 和 Windows 进程树；
+1. 接入真实插件运行时并以参考脚本证明 SourceHost 兼容率；
 2. 补增量扫描、迁移 checksum 与缺失 repository；
 3. 完成设置、歌单、在线控制器及 QML CTest Smoke；
 4. 执行 M5 性能、MSVC、部署和安装器验收；
 5. Qt Multimedia 升级时检查等价上游 MMCSS 修复，并在移除本地补丁前重跑完整生命周期门禁。
+
+## 本轮 M3 收口证据
+
+- `SourceHostClient` 在 Windows 为每次宿主启动创建 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object，并在 `QProcess::started` 后托管宿主；停止超时、崩溃、析构和进程结束路径都会终止并关闭 Job Object，避免子孙进程残留。
+- 生产 `listenfree-sourcehost` 不再包含故障注入；故障场景由独立 `listenfree-sourcehost-fault-host` 测试 Host 提供。
+- 新增故障测试覆盖启动失败、错误/延迟握手、请求、取消、超时、超大帧写失败、崩溃自动重启、优雅/强制停止、进程树清理及重复 start/stop 生命周期；Debug/Release 全量 CTest 均通过。

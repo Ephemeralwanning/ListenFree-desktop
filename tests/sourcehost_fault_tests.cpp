@@ -125,18 +125,19 @@ void SourceHostFaultTests::cancellationAndTimeoutAreExactlyOnce() {
 }
 
 void SourceHostFaultTests::writeFailureIsTerminal() {
-    setFaultMode(QStringLiteral("writefail"));
+    setFaultMode(QStringLiteral("normal"));
     SourceHostClient client(faultHostPath());
     QSignalSpy ready(&client, &SourceHostClient::ready);
     QSignalSpy finished(&client, &SourceHostClient::requestFinished);
     QVERIFY(client.start());
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
-    QTest::qWait(100);
-    const bool accepted = client.request(request(QStringLiteral("write-fail")), 200);
+    auto oversized = request(QStringLiteral("write-fail"));
+    oversized.payload.insert(QStringLiteral("blob"), QString(1024 * 1024, QChar('x')));
+    const bool accepted = client.request(oversized, 200);
     QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 1000);
     const auto terminal = finished.at(0).at(1).value<SourceHostClient::RequestTerminal>();
-    QVERIFY(terminal != SourceHostClient::RequestTerminal::Succeeded);
-    QVERIFY(accepted || terminal == SourceHostClient::RequestTerminal::WriteFailed);
+    QVERIFY(!accepted);
+    QCOMPARE(terminal, SourceHostClient::RequestTerminal::WriteFailed);
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
 }

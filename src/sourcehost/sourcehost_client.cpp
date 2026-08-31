@@ -7,7 +7,71 @@
 
 #include <utility>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 namespace listenfree::sourcehost {
+
+#ifdef Q_OS_WIN
+void SourceHostClient::JobHandleDeleter::operator()(void* handle) const noexcept {
+    if (handle != nullptr) CloseHandle(static_cast<HANDLE>(handle));
+}
+
+bool SourceHostClient::createJobObject() {
+    if (jobHandle_) return true;
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job == nullptr) {
+        emit protocolError(QStringLiteral("sourcehost-job-create-failed:%1").arg(GetLastError()));
+        return false;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        const auto error = GetLastError();
+        CloseHandle(job);
+        emit protocolError(QStringLiteral("sourcehost-job-configure-failed:%1").arg(error));
+        return false;
+    }
+    jobHandle_.reset(job);
+    return true;
+}
+
+bool SourceHostClient::assignProcessToJob() {
+    if (!jobHandle_) return false;
+    const auto processId = static_cast<DWORD>(process_.processId());
+    if (processId == 0) return false;
+    HANDLE processHandle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                       FALSE, processId);
+    if (processHandle == nullptr) {
+        emit protocolError(QStringLiteral("sourcehost-process-open-failed:%1").arg(GetLastError()));
+        return false;
+    }
+    const BOOL assigned = AssignProcessToJobObject(static_cast<HANDLE>(jobHandle_.get()), processHandle);
+    const auto error = assigned ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(processHandle);
+    if (!assigned) {
+        emit protocolError(QStringLiteral("sourcehost-job-assign-failed:%1").arg(error));
+        return false;
+    }
+    return true;
+}
+
+void SourceHostClient::terminateProcessTree() noexcept {
+    if (jobHandle_) TerminateJobObject(static_cast<HANDLE>(jobHandle_.get()), 1);
+}
+
+void SourceHostClient::closeJobObject() noexcept {
+    terminateProcessTree();
+    jobHandle_.reset();
+}
+#endif
+
+#ifndef Q_OS_WIN
+void SourceHostClient::terminateProcessTree() noexcept {}
+void SourceHostClient::closeJobObject() noexcept {}
+#endif
 
 SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
     : QObject(parent), executablePath_(std::move(executablePath)) {
@@ -21,12 +85,17 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
         failHandshake(QStringLiteral("sourcehost-handshake-timeout"));
     });
     connect(&stopTimer_, &QTimer::timeout, this, [this] {
+        terminateProcessTree();
         if (running()) process_.kill();
     });
     connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         emit protocolError(process_.errorString());
+        if (error == QProcess::WriteError) {
+            finishAll(RequestTerminal::WriteFailed);
+        }
         if (error == QProcess::FailedToStart) {
             handshakeTimer_.stop();
+            closeJobObject();
             transitionTo(HostState::Stopped);
         }
     });
@@ -35,6 +104,17 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
         if (!error.isEmpty()) emit protocolError(QString::fromUtf8(error));
     });
     connect(&process_, &QProcess::started, this, [this] {
+        if (stopping_) {
+            terminateProcessTree();
+            process_.kill();
+            return;
+        }
+        if (!assignProcessToJob()) {
+            stopping_ = true;
+            transitionTo(HostState::Stopping);
+            process_.kill();
+            return;
+        }
         SourceMessage hello;
         hello.type = MessageType::Hello;
         hello.requestId = handshakeRequestId_;
@@ -46,6 +126,7 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
     connect(&process_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
         handshakeTimer_.stop();
         stopTimer_.stop();
+        closeJobObject();
         handshakeComplete_ = false;
         const bool failed = status == QProcess::CrashExit || exitCode != 0;
         if (failed && !stopping_) {
@@ -76,13 +157,17 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
 SourceHostClient::~SourceHostClient() {
     stop();
     if (running()) {
+        terminateProcessTree();
         process_.kill();
-        process_.waitForFinished(1000);
     }
+    closeJobObject();
 }
 
 bool SourceHostClient::start() {
     if (running() || executablePath_.isEmpty()) return false;
+#ifdef Q_OS_WIN
+    if (!createJobObject()) return false;
+#endif
     stopTimer_.stop();
     stopping_ = false;
     handshakeComplete_ = false;
@@ -135,6 +220,11 @@ bool SourceHostClient::request(const SourceMessage& message, int timeoutMs) {
     pending_.insert(requestId, timer);
     timer->start(timeoutMs);
     const QByteArray frame = SourceProtocol::encode(message);
+    if (frame.size() <= 4 || frame.size() > (1024 * 1024 + 4)) {
+        emit protocolError(QStringLiteral("outgoing-frame-too-large"));
+        finishRequest(requestId, RequestTerminal::WriteFailed);
+        return false;
+    }
     if (process_.write(frame) != frame.size()) {
         finishRequest(requestId, RequestTerminal::WriteFailed);
         return false;

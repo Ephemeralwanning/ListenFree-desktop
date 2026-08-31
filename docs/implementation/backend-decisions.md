@@ -72,3 +72,12 @@ This log records reversible backend choices made without blocking design work. C
 - **Evidence:** The unpatched minimal control grew by 19–21 handles and retained `\Device\MMCSS`; the patched control was `584 -> 584` with no MMCSS handle. With the same product-test executable, the global unpatched DLL failed both retained lifecycle gates (`+22`, `+8`), while the patched DLL stayed at `+2`, `+1`; Debug/Release full CTest both passed 4/4.
 - **Alternatives:** Disable Qt's MMCSS registration; select another Qt media backend; wait for upstream; replace Qt output with FFmpeg + cubeb. Disabling real-time scheduling changes playback behavior, while the other options have a larger capability or delivery risk.
 - **Review later:** At every Qt Multimedia upgrade, inspect upstream for an equivalent fix. Remove the local patch only after the upstream source and full lifecycle tests prove it redundant.
+
+## BID-009 — Attach every SourceHost process to a Windows Job Object
+
+- **Question:** How should SourceHost descendants be cleaned up when the host crashes, times out, is force-terminated, or the client process exits unexpectedly?
+- **Choice:** `SourceHostClient` creates a per-launch Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigns the started host process, and terminates/closes the job on stop timeout, crash, finish and destructor paths. The handle is owned by a custom-deleter `std::unique_ptr`; non-Windows builds use a no-op boundary.
+- **Reason:** Closing the job handle is an OS-enforced process-tree boundary, including parent-crash cleanup, and avoids polling or blocking waits on the controller thread. Explicit `TerminateJobObject` covers graceful-stop failures and already-exited roots with surviving descendants.
+- **Alternatives:** Track child PIDs (racy and incomplete); recursive toolhelp termination (misses races and requires more permissions); wait-based cleanup (blocks the owner thread).
+- **Evidence:** The independent fault Host spawns a `cmd.exe` child. Debug/Release tests verify non-zero child PID and exit after both graceful and forced stop, plus repeated start/stop with no remaining QTimer children or SourceHost processes. The production Host contains no fault injection.
+- **Review later:** Revalidate nested-job behavior on the supported Windows 10/11 release environments and retain the same public SourceHost interface.
