@@ -5,6 +5,9 @@ param(
 $ErrorActionPreference='Stop'
 $package=(Resolve-Path -LiteralPath $PackageRoot).Path
 $executable=Join-Path $package 'listenfree.exe'
+if(!(Test-Path -LiteralPath (Join-Path $package 'imageformats\qwebp.dll'))) {
+    throw '便携包缺少 WebP 图片解码插件，咪咕等平台的歌曲封面无法显示。'
+}
 $names=@('PATH','QT_PLUGIN_PATH','QML2_IMPORT_PATH','QML_IMPORT_PATH','QT_QPA_PLATFORM_PLUGIN_PATH','QMMP_PLUGINS')
 $previous=@{}
 foreach($name in $names) { $previous[$name]=[Environment]::GetEnvironmentVariable($name,'Process') }

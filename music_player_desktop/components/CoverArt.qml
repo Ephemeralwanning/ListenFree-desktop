@@ -11,13 +11,14 @@ Item {
     property bool usingFallback: false
     property int recoveryAttempt: 0
     readonly property url effectiveSource: AppTheme.artworkUrl(root.usingFallback ? root.fallbackSource : root.source,root.sourcePixelSize)
-    onEffectiveSourceChanged: { recoveryTimer.stop(); recoveryAttempt = 0; Qt.callLater(recoverIfMissing) }
+    onEffectiveSourceChanged: { recoveryTimer.stop(); recoveryAttempt = 0; sourceStateTimer.restart() }
     readonly property bool missingArtwork: sourceImage.status !== Image.Ready || (sourceImage.implicitWidth <= 1 && sourceImage.implicitHeight <= 1)
     onSourceChanged: usingFallback = false
-    onFallbackSourceChanged: { usingFallback = false; tryFallback() }
+    onFallbackSourceChanged: { usingFallback = false; sourceStateTimer.restart() }
     function tryFallback() {
         if (!usingFallback && String(fallbackSource).length && String(fallbackSource) !== String(source)
-                && (sourceImage.status === Image.Error || (sourceImage.status === Image.Ready && sourceImage.implicitWidth <= 1 && sourceImage.implicitHeight <= 1)))
+                && (sourceImage.status === Image.Null || sourceImage.status === Image.Error
+                    || (sourceImage.status === Image.Ready && sourceImage.implicitWidth <= 1 && sourceImage.implicitHeight <= 1)))
             usingFallback = true
     }
     function needsRecovery() {
@@ -33,7 +34,15 @@ Item {
         else recoveryTimer.stop()
     }
     onVisibleChanged: recoverIfMissing()
-    Component.onCompleted: recoverIfMissing()
+    Component.onCompleted: sourceStateTimer.restart()
+    Component.onDestruction: { sourceStateTimer.stop(); recoveryTimer.stop() }
+    // Let source/status/size bindings settle together. The timer belongs to
+    // this delegate, so a queued check cannot outlive its QML context.
+    Timer {
+        id: sourceStateTimer
+        interval: 0
+        onTriggered: { root.tryFallback(); root.recoverIfMissing() }
+    }
     Timer {
         id: recoveryTimer
         interval: root.recoveryAttempt === 0 ? 350 : 1100
@@ -76,25 +85,30 @@ Item {
         source: root.recoveryAttempt === 0 ? root.effectiveSource
             : String(root.effectiveSource) + (String(root.effectiveSource).indexOf("?") >= 0 ? "&" : "?") + "lf_retry=" + root.recoveryAttempt
         cache: root.recoveryAttempt === 0
-        onStatusChanged: { root.tryFallback(); root.recoverIfMissing() }
-        onImplicitWidthChanged: { root.tryFallback(); root.recoverIfMissing() }
-        onImplicitHeightChanged: root.recoverIfMissing()
+        // Let the current source binding finish before choosing another URL.
+        onStatusChanged: sourceStateTimer.restart()
+        onImplicitWidthChanged: sourceStateTimer.restart()
+        onImplicitHeightChanged: sourceStateTimer.restart()
         sourceSize.width: root.sourcePixelSize
         sourceSize.height: root.sourcePixelSize
         fillMode: Image.PreserveAspectCrop
         smooth: true
         mipmap: true
         visible: false
+        // Only shape-fill consumers need a pre-cropped offscreen texture.
+        // Ordinary covers sample the decoded Image directly below.
         layer.enabled: root.textureOnly
         layer.smooth: true
     }
 
-    Rectangle {
-        id: maskItem
+    ShaderEffect {
+        objectName: "staticCoverEffect"
         anchors.fill: parent
-        radius: root.cornerRadius
-        visible: false
-        layer.enabled: !root.textureOnly
+        visible: !root.textureOnly && !root.dynamicTexture
+        property Item source: sourceImage
+        property size surfaceSize: Qt.size(width, height)
+        property real radius: root.cornerRadius
+        fragmentShader: "qrc:/shaders/cover-rounded.frag.qsb"
     }
 
     Loader {
@@ -142,14 +156,26 @@ Item {
         }
     }
 
-    MultiEffect {
+    Loader {
         anchors.fill: parent
-        visible: !root.textureOnly && (!root.missingArtwork || !!root.dynamicTexture)
-        source: motionLoader.item && motionLoader.item.ready ? motionLoader.item.output : sourceImage
-        maskEnabled: true
-        maskSource: maskItem
-        maskThresholdMin: 0.5
-        maskSpreadAtMin: 1.0
+        active: !root.textureOnly && !!root.dynamicTexture
+        sourceComponent: Item {
+            Rectangle {
+                id: motionMask
+                anchors.fill: parent
+                radius: root.cornerRadius
+                visible: false
+                layer.enabled: true
+            }
+            MultiEffect {
+                anchors.fill: parent
+                source: root.dynamicTexture
+                maskEnabled: true
+                maskSource: motionMask
+                maskThresholdMin: 0.5
+                maskSpreadAtMin: 1.0
+            }
+        }
     }
 
 }

@@ -21,6 +21,14 @@ function Invoke-Checked([string]$Executable, [string[]]$Arguments) {
 $previousPath=$env:PATH
 try {
     $env:PATH="$compilerDir;$(Join-Path $QtRoot 'bin');$previousPath"
+    # Migu and other cover providers return WebP. A minimal Qt SDK does not
+    # install Qt Image Formats, so windeployqt alone can silently omit it.
+    $webpPlugin=Join-Path $QtRoot 'plugins\imageformats\qwebp.dll'
+    if(!(Test-Path -LiteralPath $webpPlugin)) {
+        & (Join-Path $source 'scripts\build-qtimageformats.ps1') -QtRoot $QtRoot -QtToolsRoot $QtToolsRoot
+        $webpPlugin=Join-Path $source 'build\qt-imageformats-6.11.2\build\plugins\imageformats\qwebp.dll'
+    }
+    if(!(Test-Path -LiteralPath $webpPlugin)) { throw 'Required Qt WebP image decoder is missing.' }
     if (!$SkipBuild) {
         Invoke-Checked $cmake @('-S',$source,'-B',$buildDir,'-G','Ninja',
             '-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_CXX_COMPILER=$compilerDir/g++.exe",
@@ -50,6 +58,8 @@ try {
     foreach ($name in 'Input','Output','Transports','Effect') { Copy-Item -LiteralPath (Join-Path $qmmp $name) -Destination (Join-Path $stage 'qmmp') -Recurse }
     Invoke-Checked (Join-Path $QtRoot 'bin\windeployqt.exe') @('--release','--compiler-runtime','--no-translations','--qmldir',(Join-Path $source 'music_player_desktop'),(Join-Path $stage 'listenfree.exe'))
     Invoke-Checked (Join-Path $QtRoot 'bin\windeployqt.exe') @('--release','--compiler-runtime','--no-translations',(Join-Path $stage 'listenfree-sourcehost.exe'))
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage 'imageformats') | Out-Null
+    Copy-Item -LiteralPath $webpPlugin -Destination (Join-Path $stage 'imageformats\qwebp.dll') -Force
     # The application opens QSQLITE only; unused database plugins require server SDKs.
     $sqlRoot=[IO.Path]::GetFullPath((Join-Path $stage 'sqldrivers'))
     if (!$sqlRoot.StartsWith($allowedRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe SQL plugin path' }

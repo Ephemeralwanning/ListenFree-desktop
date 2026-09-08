@@ -8,6 +8,7 @@
 #include "media/audio_tail_probe.h"
 #include "online/apple_dynamic_artwork_provider.h"
 #include <QFutureWatcher>
+#include <QCache>
 #include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QPointer>
@@ -230,6 +231,7 @@ signals:
     void lyricPreviewChanged();
     void equalizerChanged();
     void trackMetadataChanged(const QVariantMap& track);
+    void trackArtworkResolved(const QString& source, const QString& rid, const QString& artwork);
     void searchHistoryChanged();
     void artistVisualChanged();
     void platformChanged();
@@ -347,6 +349,7 @@ private:
     int queueIndexFor(const QVariantMap& track) const;
     void fetchLyrics(const QString& rid);
     QSet<QString> artworkRequests_;
+    QCache<QString, QString> artworkUrls_{128};
     QVariantMap artistVisual_;
     QString artistVisualName_;
     QHash<QString,QVariantMap> artistVisualCache_;

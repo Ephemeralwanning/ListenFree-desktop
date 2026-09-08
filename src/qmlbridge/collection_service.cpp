@@ -336,9 +336,24 @@ void CollectionService::refresh(const QString &order) {
     recommendations_.clear();charts_.clear();tags_.clear();tagIds_.clear();error_.clear();requests_=1;emit discoverChanged();
     const auto provider=platform_;auto* reply=online::platformRequest(network_,provider,"lists",activeTag_,order_);
     if(!reply){requests_=0;emit discoverChanged();return;}
-    connect(reply,&QNetworkReply::finished,this,[this,reply,provider,gen]{reply->deleteLater();if(gen!=discoveryGeneration_)return;requests_=0;
-      if(reply->error()==QNetworkReply::NoError)recommendations_=online::platformPlaylists(provider,online::platformJson(reply->readAll()));
-      if(recommendations_.isEmpty())error_=QStringLiteral("此平台歌单暂不可用，请稍后重试");emit discoverChanged();});return;
+    connect(reply,&QNetworkReply::finished,this,[this,reply,provider,gen]{
+      reply->deleteLater();
+      if(gen!=discoveryGeneration_)return;
+      requests_=0;
+      const auto response=online::platformJson(reply->readAll());
+      const bool networkOk=reply->error()==QNetworkReply::NoError;
+      if(networkOk)recommendations_=online::platformPlaylists(provider,response);
+      if(recommendations_.isEmpty()) {
+        if(provider=="wy" && networkOk && response.value("code").toInt()==200) {
+          error_=order_=="new" ? QStringLiteral("网易云暂未返回最新歌单，可切换“最热”查看")
+                              : QStringLiteral("网易云暂未返回此分类的歌单，请稍后重试");
+        } else error_=QStringLiteral("此平台歌单暂不可用，请稍后重试");
+        qWarning().noquote()<<"Playlist catalog"<<provider<<"order"<<order_
+            <<"HTTP"<<reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+            <<"network"<<static_cast<int>(reply->error())<<"code"<<response.value("code").toVariant();
+      }
+      emit discoverChanged();
+    });return;
   }
   requests_ = 3;
   error_.clear();

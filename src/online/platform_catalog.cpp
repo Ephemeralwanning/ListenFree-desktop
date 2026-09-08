@@ -85,6 +85,7 @@ QVariantMap song(const QString &platform, QJsonObject o) {
     cover = o.value("imgurl").toString();
     if (cover.isEmpty()) cover = o.value("AlbumImage").toString();
     if (cover.isEmpty()) cover = o.value("Image").toString();
+    if (cover.isEmpty()) cover = o.value("trans_param").toObject().value("union_cover").toString();
     cover.replace("{size}", "400");
     extra["hash"] = hash;
     extra["albumId"] =

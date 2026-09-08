@@ -477,6 +477,13 @@ qt_add_shaders(listenfree listenfree_background_shaders
         music_player_desktop/shaders/immersive-atmosphere.frag
     FILES music_player_desktop/shaders/artwork-gaussian.frag music_player_desktop/shaders/lyric-word.frag music_player_desktop/shaders/lyric-grapheme.frag music_player_desktop/shaders/artwork-mesh.vert music_player_desktop/shaders/artwork-tone.frag music_player_desktop/shaders/artwork-flow.frag music_player_desktop/shaders/artwork-palette.frag music_player_desktop/shaders/artwork-kawase.frag music_player_desktop/shaders/artwork-flow-tint.frag
 )
+qt_add_shaders(listenfree listenfree_cover_shaders
+    PREFIX "/shaders"
+    BASE "music_player_desktop/shaders"
+    GLSL "150,300es"
+    FILES music_player_desktop/shaders/cover-rounded.frag
+)
+
 target_link_libraries(listenfree PRIVATE ole32 uuid Qt6::Multimedia listenfree_qmlbridge Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickDialogs2)
 if(LISTENFREE_BUILD_QMMP_BACKEND)
     target_link_libraries(listenfree PRIVATE listenfree_portable TagLib::tag)

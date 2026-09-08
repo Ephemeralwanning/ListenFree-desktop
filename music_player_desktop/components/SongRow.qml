@@ -5,16 +5,24 @@ Rectangle {
     id: row
     objectName: "songRow"
     property var track: ({})
-    property url artworkSource: track.artwork || ""
+    property url resolvedArtwork: ""
+    property url artworkSource: track.artwork || resolvedArtwork
     property url fallbackArtwork: ""
     function requestArtwork() {
-        if (!track.artwork && (track.source === "kw" || track.source === "wy") && typeof backendPlayerController !== "undefined")
-            backendPlayerController.requestTrackArtwork(track)
+        if (!track.artwork && (track.source === "kw" || track.source === "wy") && playerController)
+            playerController.requestTrackArtwork(track)
     }
     Component.onCompleted: requestArtwork()
-    onTrackChanged: requestArtwork()
+    onTrackChanged: { resolvedArtwork = ""; requestArtwork() }
     property int rowIndex: 0
     property var playerController: typeof backendPlayerController !== "undefined" ? backendPlayerController : null
+    Connections {
+        target: row.playerController
+        function onTrackArtworkResolved(source, rid, artwork) {
+            if (row.track.source === source && String(row.track.rid) === rid)
+                row.resolvedArtwork = artwork
+        }
+    }
     property bool current: {
         if (!playerController) return false
         const playingTrack = playerController.currentTrack // subscribe to track changes, including paused playback

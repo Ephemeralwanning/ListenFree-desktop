@@ -756,7 +756,12 @@ void PortableSession::fetchOnlineArtwork(const QVariantMap& track) {
     const auto provider=track.value("source").toString();
     if(provider!="kw" && provider!="wy")return;
     const auto rid=track.value("rid").toString(), key=songKey(track);
-    if(!QRegularExpression("^[0-9]+$").match(rid).hasMatch() || !track.value("artwork").toString().isEmpty() || artworkRequests_.contains(key))return;
+    if(!QRegularExpression("^[0-9]+$").match(rid).hasMatch() || !track.value("artwork").toString().isEmpty())return;
+    if(const auto* cached=artworkUrls_.object(key)) {
+        emit trackArtworkResolved(provider,rid,*cached);
+        return;
+    }
+    if(artworkRequests_.contains(key))return;
     QNetworkReply* reply=nullptr;
     if(provider=="wy")reply=online::platformRequest(network_,provider,"song",rid);
     else {
@@ -769,7 +774,7 @@ void PortableSession::fetchOnlineArtwork(const QVariantMap& track) {
     if(!reply)return;
     artworkRequests_.insert(key);
     connect(reply,&QIODevice::readyRead,this,[reply]{if(reply->bytesAvailable()>512*1024)reply->abort();});
-    connect(reply,&QNetworkReply::finished,this,[this,reply,key,provider]{
+    connect(reply,&QNetworkReply::finished,this,[this,reply,key,provider,rid]{
         artworkRequests_.remove(key);reply->deleteLater();
         if(reply->error()!=QNetworkReply::NoError)return;
         QString value;
@@ -779,11 +784,14 @@ void PortableSession::fetchOnlineArtwork(const QVariantMap& track) {
         } else value=QString::fromUtf8(reply->readAll()).trimmed();
         const QUrl cover(value);
         if(!cover.isValid() || cover.host().isEmpty() || (cover.scheme()!="https" && cover.scheme()!="http"))return;
+        const auto artwork=cover.toString();
+        artworkUrls_.insert(key,new QString(artwork));
         bool queueUpdated=false,searchUpdated=false;
         for(auto& row:entries_)if(songKey(row)==key){row["artwork"]=cover.toString();queueUpdated=true;}
         for(auto& value:searchResults_){auto row=value.toMap();if(songKey(row)!=key)continue;row["artwork"]=cover.toString();value=row;searchUpdated=true;}
         if(queueUpdated){syncQueue();if(songKey(currentTrack())==key)emit currentTrackChanged();}
         if(searchUpdated)emit searchResultsChanged();
+        emit trackArtworkResolved(provider,rid,artwork);
     });
 }
 void PortableSession::loadLyrics(const QString& path) {

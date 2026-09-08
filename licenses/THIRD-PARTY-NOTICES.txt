@@ -28,3 +28,7 @@ Verblib 0.5，Philip Bennefall（MIT-0）：取自 miniaudio 0.11.23 的独立�
 utf8cpp（Boost Software License）：TagLib 使用的 UTF-8 支持。
 
 各组件许可原文见本目录对应文件及源码头部。部署时另外收集实际运行库包的 copyright 文件。
+
+Qt Image Formats 6.11.2：未修改的官方 WebP 图片插件（Qt LGPL-3.0 等许可）。
+https://github.com/qt/qtimageformats/tree/v6.11.2
+该插件包含 libwebp 1.6.0（BSD-3-Clause），许可与专利授权见 libwebp-COPYING.txt、libwebp-PATENTS.txt。

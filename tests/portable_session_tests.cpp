@@ -45,6 +45,19 @@ class PortableTests : public QObject {
     QString mp3_, flac_, third_, originalPcm_;
     QVariantMap local(const QString& path) { return {{"trackId", path}, {"title", QFileInfo(path).completeBaseName()}, {"localPath", path}}; }
 private slots:
+    void kugouPlaylistTrackArtwork() {
+        // Mobile playlist rows put album artwork inside trans_param.
+        const QJsonObject metadata{{"union_cover","https://imge.kugou.com/stdmusic/{size}/album.jpg"}};
+        const QJsonArray songs{
+            QJsonObject{{"hash","fixture-hash"},{"filename","Artist - Song"},{"duration",249},{"trans_param",metadata}},
+            QJsonObject{{"hash","direct-hash"},{"filename","Artist - Direct"},
+                {"imgurl","https://imgessl.kugou.com/direct.jpg"},{"trans_param",metadata}}};
+        const QJsonObject payload{{"list",QJsonObject{{"list",QJsonObject{{"info",songs}}}}}};
+        const auto rows=online::platformSongs("kg",payload);
+        QCOMPARE(rows.size(),2);
+        QCOMPARE(rows[0].toMap().value("artwork").toString(),QString("https://imge.kugou.com/stdmusic/400/album.jpg"));
+        QCOMPARE(rows[1].toMap().value("artwork").toString(),QString("https://imgessl.kugou.com/direct.jpg"));
+    }
     void soundPresetsAndPersistence() {
         infrastructure::database::Database db;const auto path=temporary_.filePath("sound-presets.sqlite");
         QVERIFY(db.open(path));QVERIFY(db.migrate());

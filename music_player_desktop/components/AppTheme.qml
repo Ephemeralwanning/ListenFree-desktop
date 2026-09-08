@@ -11,7 +11,13 @@ QtObject {
         if (/music\.126\.net/.test(url)) {
             if (/([?&])param=/.test(url)) url=url.replace(/([?&])param=[^&]+/, "$1param="+size+"y"+size)
             else url += (url.indexOf("?")>=0 ? "&" : "?")+"param="+size+"y"+size
-        } else if (/y\.gtimg\.cn/.test(url)) url=url.replace(/T002R\d+x\d+M/,"T002R"+Math.min(800,size)+"x"+Math.min(800,size)+"M")
+        } else if (/y\.gtimg\.cn/.test(url)) {
+            // QQ serves fixed CDN variants, not arbitrary decoder dimensions.
+            // Round up so high-DPI thumbnails retain their requested detail.
+            const supported = [90, 150, 300, 500, 800]
+            const remoteSize = supported.find(value => value >= size) || 800
+            url=url.replace(/T002R\d+x\d+M/,"T002R"+remoteSize+"x"+remoteSize+"M")
+        }
         else if (/kuwo\.cn/.test(url)) url=url.replace(/(\/albumcover\/)\d+\//,"$1"+Math.min(500,size)+"/")
         else if (/kugou\.com/.test(url)) url=url.replace(/(\/stdmusic\/)\d+\//,"$1"+Math.min(480,size)+"/")
         return url
