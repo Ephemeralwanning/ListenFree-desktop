@@ -1,0 +1,42 @@
+# ListenFree
+
+Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng 和 TagLib。
+安装版及便携版见 [Releases](https://github.com/Tabris-Ayanami/ListenFree-desktop/releases)。运行成品无需安装 Qt、Node.js 或 Python。
+
+## 构建输入
+
+- Qt 6.11.2 MinGW x64，包含 Quick、Multimedia、ShaderTools、Sql 和 Test；MinGW 13.1、CMake 3.28+、Ninja。
+- 使用根目录 vcpkg.json 固定版本安装 QuickJS-ng、TagLib 及 zlib，依赖前缀为 .vcpkg_installed/x64-mingw-dynamic。
+- 构建 Qmmp 2.4.1 及 FFmpeg、libcurl 等依赖。先应用 patches/qmmp/2.4.1/0001 和 0003，再按编号应用 patches/qmmp/0004 至 0020；不应用已撤销的 0002。
+- Qmmp 的 FFmpeg、HTTP、WASAPI、Crossfade 插件及 libqmmpui 需与补丁后的 libqmmp 一起构建。Qt Multimedia 修复脚本为 scripts/build-patched-qtmultimedia.ps1。
+
+第三方源码、SDK、依赖安装目录和二进制不纳入 Git。默认外部依赖布局如下，也可通过 CMake cache 参数覆盖：
+
+```text
+../_vendor/
+  qmmp-2.4.1/                 # 已应用补丁的源码
+  qmmp-stage-qt/              # libqmmp.dll、导入库和 Input/Output/Transports/Effect
+  qmmp-build-qt/src/qmmpui/   # libqmmpui.dll 和导入库
+  qmmp-build-qt/src/plugins/Transports/http/  # 新版 http.dll
+  qmmp-vcpkg-installed-qt/x64-mingw-dynamic/ # FFmpeg/libcurl 等头文件、库和运行库
+```
+
+## 编译与部署
+
+在 PowerShell 中执行，可根据 SDK 位置调整参数：
+
+```powershell
+./scripts/windows/package-portable.ps1 -QtRoot 'F:/QT/6.11.2/mingw_64' -QtToolsRoot 'F:/QT/Tools' -VendorRoot '../_vendor'
+```
+
+脚本通过 CMake 构建 Release，部署到 dist/ListenFree-Portable 并做隔离启动检查。重新部署保留该目录的个人 data。CMakePresets.json 提供当前工具链的 portable 预设，可用 CMakeUserPresets.json 覆盖本机路径。
+
+安装 Inno Setup 6 和 7-Zip 后生成干净的安装版与便携 ZIP：
+
+```powershell
+./scripts/windows/package-release.ps1 -Version 0.3.1
+```
+
+发行脚本只收集程序、运行库、使用说明和许可，排除个人数据与用户音源；输出目录必须是尚未生成过的版本目录，也可指定 OutputDirectory。
+
+src/、music_player_desktop/、ui/ 是应用与资源；tests/ 和 tools/ 保留构建引用的验证代码；patches/、scripts/、packaging/ 和 licenses/ 为依赖修改及打包输入。个人文档、开发规划、生成物和测试结果不进入仓库。组件归属与许可见 licenses/THIRD-PARTY-NOTICES.txt。

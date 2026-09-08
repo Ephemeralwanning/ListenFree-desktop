@@ -1,16 +1,17 @@
 #include "sourcehost/plugin_runtime.h"
+#include "platform/windows_crypto.h"
 
 #include <QFile>
 #include <QFileInfo>
 #include <QCryptographicHash>
-#include <QJSEngine>
-#include <QJSValue>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QHttpMultiPart>
 #include <QNetworkAccessManager>
+#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
@@ -19,14 +20,20 @@
 #include <QSet>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QTimer>
 
+#include <quickjs.h>
 #include <zlib.h>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #endif
 
+#include <chrono>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -40,53 +47,285 @@ constexpr qsizetype MaxPluginBytes = 1024 * 1024;
 constexpr qsizetype MaxPendingPluginRequests = 256;
 constexpr qsizetype MaxUrlBytes = 2048;
 constexpr qsizetype MaxPendingNetworkRequests = 64;
+constexpr qsizetype MaxNetworkRequestBytes = 8 * 1024 * 1024;
 constexpr qsizetype MaxNetworkResponseBytes = 8 * 1024 * 1024;
+constexpr qsizetype MaxProtocolFrameBytes = 1024 * 1024 + 4;
 
 #ifdef Q_OS_WIN
-QByteArray aesEncryptBytes(const QByteArray& input, const QByteArray& key, const QByteArray& iv, const QString& mode);
+using platform::aesEncryptBytes;
+using platform::rsaEncryptBytes;
 #endif
 
-QString scriptError(const QJSValue& value) {
-    QString result = value.toString();
-    const QString stack = value.property(QStringLiteral("stack")).toString();
-    if (!stack.isEmpty()) result += QStringLiteral(" | ") + stack;
-    return result;
-}
-
-class PluginBridge final : public QObject {
-    Q_OBJECT
+class QuickJsEngine final {
 public:
-    Q_INVOKABLE void sendEvent(const QString& eventName, const QString& json) {
-        emit eventSent(eventName, json);
+    struct Callbacks {
+        std::function<void(const QString&, const QString&)> eventSent;
+        std::function<void(const QString&, const QString&)> requestResolved;
+        std::function<void(const QString&, const QString&)> requestRejected;
+        std::function<QString(const QString&, const QString&, const QString&)> requestStarted;
+        std::function<void(const QString&)> requestAborted;
+    };
+
+    explicit QuickJsEngine(Callbacks callbacks) : callbacks_(std::move(callbacks)) {
+        runtime_ = JS_NewRuntime();
+        if (!runtime_) return;
+        JS_SetMemoryLimit(runtime_, 96U * 1024U * 1024U);
+        JS_SetMaxStackSize(runtime_, 1024U * 1024U);
+        JS_SetCanBlock(runtime_, false);
+        JS_SetInterruptHandler(runtime_, &QuickJsEngine::interrupt, this);
+        JS_SetHostPromiseRejectionTracker(runtime_, &QuickJsEngine::promiseRejectionTracker,
+                                          this);
+        context_ = JS_NewContext(runtime_);
+        if (!context_) return;
+        JS_SetContextOpaque(context_, this);
+        valid_ = installBridge();
     }
 
-    Q_INVOKABLE void resolveRequest(const QString& requestId, const QString& json) {
-        emit requestResolved(requestId, json);
+    ~QuickJsEngine() {
+        clearUnhandledRejections();
+        if (context_) JS_FreeContext(context_);
+        if (runtime_) JS_FreeRuntime(runtime_);
     }
 
-    Q_INVOKABLE void rejectRequest(const QString& requestId, const QString& message) {
-        emit requestRejected(requestId, message);
+    QuickJsEngine(const QuickJsEngine&) = delete;
+    QuickJsEngine& operator=(const QuickJsEngine&) = delete;
+
+    bool isValid() const { return valid_; }
+    QString initializationError() const { return initializationError_; }
+
+    bool evaluate(const QString& script, const QString& filename, QString* error) {
+        if (!context_) {
+            if (error) *error = QStringLiteral("Unable to create JavaScript runtime.");
+            return false;
+        }
+        const QByteArray source = script.toUtf8();
+        const QByteArray sourceName = filename.toUtf8();
+        beginExecution();
+        JSValue result = JS_Eval(context_, source.constData(), static_cast<size_t>(source.size()),
+                                 sourceName.constData(), JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            JS_FreeValue(context_, result);
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        JS_FreeValue(context_, result);
+        const bool succeeded = pumpJobs(error);
+        endExecution();
+        return succeeded;
     }
 
-    Q_INVOKABLE void startRequest(const QString& requestId, const QString& url, const QString& optionsJson) {
-        emit requestStarted(requestId, url, optionsJson);
+    bool setScriptInfo(const QJsonObject& metadata, QString* error) {
+        beginExecution();
+        const QByteArray json = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
+        JSValue value = JS_ParseJSON(context_, json.constData(), static_cast<size_t>(json.size()),
+                                     "currentScriptInfo");
+        if (JS_IsException(value)) {
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        JSValue global = JS_GetGlobalObject(context_);
+        JSValue lx = JS_GetPropertyStr(context_, global, "lx");
+        const int result = JS_IsObject(lx)
+                               ? JS_SetPropertyStr(context_, lx, "currentScriptInfo", value)
+                               : -1;
+        if (!JS_IsObject(lx)) JS_FreeValue(context_, value);
+        JS_FreeValue(context_, lx);
+        JS_FreeValue(context_, global);
+        if (result < 0) {
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        endExecution();
+        return true;
     }
 
-    Q_INVOKABLE void abortRequest(const QString& requestId) {
-        emit requestAborted(requestId);
+    bool hasDispatch(QString* error) {
+        if (!context_) return false;
+        beginExecution();
+        JSValue global = JS_GetGlobalObject(context_);
+        JSValue dispatch = JS_GetPropertyStr(context_, global, "__lf_dispatch");
+        if (JS_IsException(dispatch)) {
+            JS_FreeValue(context_, dispatch);
+            JS_FreeValue(context_, global);
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        const bool callable = JS_IsFunction(context_, dispatch);
+        JS_FreeValue(context_, dispatch);
+        JS_FreeValue(context_, global);
+        const bool jobsSucceeded = pumpJobs(error);
+        endExecution();
+        return callable && jobsSucceeded;
     }
 
-    Q_INVOKABLE QString bufferFromString(const QString& value, const QString& encoding) const {
+    bool dispatch(const QString& requestId, const QString& eventJson, QString* error) {
+        bool accepted = false;
+        if (!callGlobal(QStringLiteral("__lf_dispatch"), {requestId, eventJson}, &accepted, error)) {
+            return false;
+        }
+        return accepted;
+    }
+
+    bool completeNetworkRequest(const QString& requestId, const QString& errorMessage,
+                                const QString& packetJson, QString* error) {
+        return callGlobal(QStringLiteral("__lf_request_complete"),
+                          {requestId, errorMessage, packetJson}, nullptr, error);
+    }
+
+    bool dropNetworkRequest(const QString& requestId, QString* error) {
+        return callGlobal(QStringLiteral("__lf_request_drop"), {requestId}, nullptr, error);
+    }
+
+    QString lastEventName(QString* error) {
+        if (!context_) return {};
+        beginExecution();
+        JSValue global = JS_GetGlobalObject(context_);
+        JSValue lastEvent = JS_GetPropertyStr(context_, global, "__lf_last_event");
+        if (JS_IsException(lastEvent)) {
+            JS_FreeValue(context_, lastEvent);
+            JS_FreeValue(context_, global);
+            if (error) *error = takeException(context_);
+            endExecution();
+            return {};
+        }
+        JSValue name = JS_IsObject(lastEvent)
+                           ? JS_GetPropertyStr(context_, lastEvent, "name")
+                           : JS_UNDEFINED;
+        QString result;
+        if (JS_IsException(name)) {
+            if (error) *error = takeException(context_);
+        } else if (JS_IsString(name)) {
+            result = toQString(context_, name);
+        }
+        JS_FreeValue(context_, name);
+        JS_FreeValue(context_, lastEvent);
+        JS_FreeValue(context_, global);
+        if ((error == nullptr || error->isEmpty()) && !pumpJobs(error)) result.clear();
+        endExecution();
+        return result;
+    }
+
+private:
+    static constexpr int MaxPendingJobsPerTurn = 1024;
+    static constexpr qsizetype MaxUnhandledRejections = 32;
+
+    static QuickJsEngine* self(JSContext* context) {
+        return static_cast<QuickJsEngine*>(JS_GetContextOpaque(context));
+    }
+
+    static QString toQString(JSContext* context, JSValueConst value, bool* ok = nullptr) {
+        size_t size = 0;
+        const char* text = JS_ToCStringLen(context, &size, value);
+        if (!text) {
+            if (ok) *ok = false;
+            return {};
+        }
+        const QString result = QString::fromUtf8(text, static_cast<qsizetype>(size));
+        JS_FreeCString(context, text);
+        if (ok) *ok = true;
+        return result;
+    }
+
+    static JSValue fromQString(JSContext* context, const QString& value) {
+        const QByteArray encoded = value.toUtf8();
+        return JS_NewStringLen(context, encoded.constData(), static_cast<size_t>(encoded.size()));
+    }
+
+    static QString takeException(JSContext* context) {
+        JSValue exception = JS_GetException(context);
+        QString message = toQString(context, exception).left(4096);
+        QString stackText;
+        if (JS_IsObject(exception)) {
+            JSValue stack = JS_GetPropertyStr(context, exception, "stack");
+            if (JS_IsException(stack)) {
+                JS_FreeValue(context, stack);
+                JSValue nested = JS_GetException(context);
+                JS_FreeValue(context, nested);
+            } else {
+                if (JS_IsString(stack)) stackText = toQString(context, stack).left(4096);
+                JS_FreeValue(context, stack);
+            }
+        }
+        JS_FreeValue(context, exception);
+        if (!stackText.isEmpty() && stackText != message) {
+            if (!message.isEmpty()) message += QStringLiteral(" | ");
+            message += stackText.left(qMax(0, 4096 - message.size()));
+        }
+        return message.isEmpty() ? QStringLiteral("JavaScript execution failed.") : message.left(4096);
+    }
+
+    static bool strings(JSContext* context, int argc, JSValueConst* argv, int count,
+                        QString* output) {
+        if (argc < count) {
+            JS_ThrowTypeError(context, "missing bridge argument");
+            return false;
+        }
+        for (int index = 0; index < count; ++index) {
+            bool ok = false;
+            output[index] = toQString(context, argv[index], &ok);
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    static JSValue sendEvent(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+        self(context)->callbacks_.eventSent(values[0], values[1]);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue resolveRequest(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+        self(context)->callbacks_.requestResolved(values[0], values[1]);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue rejectRequest(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+        self(context)->callbacks_.requestRejected(values[0], values[1]);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue startRequest(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[3];
+        if (!strings(context, argc, argv, 3, values)) return JS_EXCEPTION;
+        const QString error = self(context)->callbacks_.requestStarted(values[0], values[1], values[2]);
+        if (!error.isEmpty()) {
+            const QByteArray encoded = error.toUtf8();
+            return JS_ThrowTypeError(context, "%s", encoded.constData());
+        }
+        return JS_UNDEFINED;
+    }
+
+    static JSValue abortRequest(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString value;
+        if (!strings(context, argc, argv, 1, &value)) return JS_EXCEPTION;
+        self(context)->callbacks_.requestAborted(value);
+        return JS_UNDEFINED;
+    }
+
+    static QString bufferFromStringValue(const QString& value, const QString& encoding) {
         if (encoding.compare(QStringLiteral("base64"), Qt::CaseInsensitive) == 0) {
             return QString::fromLatin1(QByteArray::fromBase64(value.toLatin1()).toBase64());
         }
         if (encoding.compare(QStringLiteral("hex"), Qt::CaseInsensitive) == 0) {
             return QString::fromLatin1(QByteArray::fromHex(value.toLatin1()).toBase64());
         }
+        if (encoding.compare(QStringLiteral("binary"), Qt::CaseInsensitive) == 0 ||
+            encoding.compare(QStringLiteral("latin1"), Qt::CaseInsensitive) == 0) {
+            return QString::fromLatin1(value.toLatin1().toBase64());
+        }
         return QString::fromLatin1(value.toUtf8().toBase64());
     }
 
-    Q_INVOKABLE QString bufferToString(const QString& base64, const QString& encoding) const {
+    static QString bufferToStringValue(const QString& base64, const QString& encoding) {
         const QByteArray bytes = QByteArray::fromBase64(base64.toLatin1());
         if (encoding.compare(QStringLiteral("base64"), Qt::CaseInsensitive) == 0) {
             return QString::fromLatin1(bytes.toBase64());
@@ -97,62 +336,113 @@ public:
         return QString::fromUtf8(bytes);
     }
 
-    Q_INVOKABLE QString bufferConcat(const QStringList& values) const {
+    static JSValue bufferFromString(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+        return fromQString(context, bufferFromStringValue(values[0], values[1]));
+    }
+
+    static JSValue bufferToString(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+        return fromQString(context, bufferToStringValue(values[0], values[1]));
+    }
+
+    static JSValue bufferConcat(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        if (argc < 1 || !JS_IsArray(argv[0])) return JS_ThrowTypeError(context, "expected string array");
+        int64_t length = 0;
+        if (JS_GetLength(context, argv[0], &length) < 0 || length < 0 || length > 65536) {
+            return JS_ThrowTypeError(context, "invalid buffer array length");
+        }
         QByteArray result;
-        for (const auto& value : values) result.append(QByteArray::fromBase64(value.toLatin1()));
-        return QString::fromLatin1(result.toBase64());
+        for (int64_t index = 0; index < length; ++index) {
+            JSValue item = JS_GetPropertyInt64(context, argv[0], index);
+            bool ok = false;
+            const QString encoded = toQString(context, item, &ok);
+            JS_FreeValue(context, item);
+            if (!ok) return JS_EXCEPTION;
+            result.append(QByteArray::fromBase64(encoded.toLatin1()));
+            if (result.size() > MaxPluginBytes) {
+                return JS_ThrowTypeError(context, "combined buffer exceeds the 1 MiB limit");
+            }
+        }
+        return fromQString(context, QString::fromLatin1(result.toBase64()));
     }
 
-    Q_INVOKABLE int bufferLength(const QString& base64) const {
-        return QByteArray::fromBase64(base64.toLatin1()).size();
+    static JSValue bufferLength(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString value;
+        if (!strings(context, argc, argv, 1, &value)) return JS_EXCEPTION;
+        return JS_NewInt64(context, QByteArray::fromBase64(value.toLatin1()).size());
     }
 
-    Q_INVOKABLE QString md5(const QString& value) const {
-        return QString::fromLatin1(QCryptographicHash::hash(value.toUtf8(), QCryptographicHash::Md5).toHex());
+    static JSValue md5(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString value;
+        if (!strings(context, argc, argv, 1, &value)) return JS_EXCEPTION;
+        return fromQString(context, QString::fromLatin1(
+                                        QCryptographicHash::hash(value.toUtf8(), QCryptographicHash::Md5).toHex()));
     }
 
-    Q_INVOKABLE QString aesEncrypt(const QString& inputBase64, const QString& mode,
-                                   const QString& keyBase64, const QString& ivBase64) const {
+    static JSValue aesEncrypt(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[4];
+        if (!strings(context, argc, argv, 4, values)) return JS_EXCEPTION;
 #ifdef Q_OS_WIN
-        const QByteArray encrypted = aesEncryptBytes(QByteArray::fromBase64(inputBase64.toLatin1()),
-                                                     QByteArray::fromBase64(keyBase64.toLatin1()),
-                                                     QByteArray::fromBase64(ivBase64.toLatin1()), mode);
-        return encrypted.isEmpty() ? QString() : QString::fromLatin1(encrypted.toBase64());
+        const QByteArray encrypted = aesEncryptBytes(QByteArray::fromBase64(values[0].toLatin1()),
+                                                     QByteArray::fromBase64(values[2].toLatin1()),
+                                                     QByteArray::fromBase64(values[3].toLatin1()), values[1]);
+        return fromQString(context, encrypted.isEmpty() ? QString() : QString::fromLatin1(encrypted.toBase64()));
 #else
-        Q_UNUSED(inputBase64);
-        Q_UNUSED(mode);
-        Q_UNUSED(keyBase64);
-        Q_UNUSED(ivBase64);
-        return {};
+        return fromQString(context, {});
 #endif
     }
 
-    Q_INVOKABLE QString randomBytes(int size) const {
-        if (size < 0 || size > 1024 * 1024) return {};
-        QByteArray bytes(size, Qt::Uninitialized);
-        for (int i = 0; i < size; ++i) {
+    static JSValue rsaEncrypt(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString values[2];
+        if (!strings(context, argc, argv, 2, values)) return JS_EXCEPTION;
+#ifdef Q_OS_WIN
+        const QByteArray encrypted = rsaEncryptBytes(QByteArray::fromBase64(values[0].toLatin1()), values[1]);
+        return fromQString(context, encrypted.isEmpty() ? QString() : QString::fromLatin1(encrypted.toBase64()));
+#else
+        return fromQString(context, {});
+#endif
+    }
+
+    static JSValue randomBytes(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        int64_t size = -1;
+        if (argc < 1 || JS_ToInt64(context, &size, argv[0]) < 0) return JS_EXCEPTION;
+        if (size < 0 || size > 1024 * 1024) return fromQString(context, {});
+        QByteArray bytes(static_cast<qsizetype>(size), Qt::Uninitialized);
+        for (qsizetype i = 0; i < bytes.size(); ++i) {
             bytes[i] = static_cast<char>(QRandomGenerator::global()->generate() & 0xffU);
         }
-        return QString::fromLatin1(bytes.toBase64());
+        return fromQString(context, QString::fromLatin1(bytes.toBase64()));
     }
 
-    Q_INVOKABLE QString zeroBytes(int size) const {
-        if (size < 0 || size > 1024 * 1024) return {};
-        return QString::fromLatin1(QByteArray(size, '\0').toBase64());
+    static JSValue zeroBytes(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        int64_t size = -1;
+        if (argc < 1 || JS_ToInt64(context, &size, argv[0]) < 0) return JS_EXCEPTION;
+        if (size < 0 || size > 1024 * 1024) return fromQString(context, {});
+        return fromQString(context, QString::fromLatin1(
+                                        QByteArray(static_cast<qsizetype>(size), '\0').toBase64()));
     }
 
-    Q_INVOKABLE QString deflate(const QString& base64) const {
+    static JSValue deflate(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString base64;
+        if (!strings(context, argc, argv, 1, &base64)) return JS_EXCEPTION;
         const QByteArray input = QByteArray::fromBase64(base64.toLatin1());
         uLongf outputSize = ::compressBound(static_cast<uLong>(input.size()));
         QByteArray output(static_cast<qsizetype>(outputSize), Qt::Uninitialized);
         if (::compress2(reinterpret_cast<Bytef*>(output.data()), &outputSize,
                         reinterpret_cast<const Bytef*>(input.constData()),
-                        static_cast<uLong>(input.size()), Z_DEFAULT_COMPRESSION) != Z_OK) return {};
+                        static_cast<uLong>(input.size()), Z_DEFAULT_COMPRESSION) != Z_OK) {
+            return fromQString(context, {});
+        }
         output.resize(static_cast<qsizetype>(outputSize));
-        return QString::fromLatin1(output.toBase64());
+        return fromQString(context, QString::fromLatin1(output.toBase64()));
     }
 
-    Q_INVOKABLE QString inflate(const QString& base64) const {
+    static JSValue inflate(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        QString base64;
+        if (!strings(context, argc, argv, 1, &base64)) return JS_EXCEPTION;
         const QByteArray input = QByteArray::fromBase64(base64.toLatin1());
         uLongf outputSize = 64U * 1024U;
         while (outputSize <= static_cast<uLong>(MaxPluginBytes)) {
@@ -163,27 +453,321 @@ public:
                                              static_cast<uLong>(input.size()));
             if (result == Z_OK) {
                 output.resize(static_cast<qsizetype>(actualSize));
-                return QString::fromLatin1(output.toBase64());
+                return fromQString(context, QString::fromLatin1(output.toBase64()));
             }
             if (result != Z_BUF_ERROR || outputSize == static_cast<uLong>(MaxPluginBytes)) break;
             outputSize = qMin(static_cast<uLong>(MaxPluginBytes), outputSize * 2U);
         }
-        return {};
+        return fromQString(context, {});
     }
 
-signals:
-    void eventSent(const QString& eventName, const QString& json);
-    void requestResolved(const QString& requestId, const QString& json);
-    void requestRejected(const QString& requestId, const QString& message);
-    void requestStarted(const QString& requestId, const QString& url, const QString& optionsJson);
-    void requestAborted(const QString& requestId);
+    enum BridgeFunction {
+        SendEvent,
+        ResolveRequest,
+        RejectRequest,
+        StartRequest,
+        AbortRequest,
+        BufferFromString,
+        BufferToString,
+        BufferConcat,
+        BufferLength,
+        Md5,
+        AesEncrypt,
+        RsaEncrypt,
+        RandomBytes,
+        ZeroBytes,
+        Deflate,
+        Inflate,
+    };
+
+    static JSValue guardedBridgeCall(JSContext* context, JSValueConst thisValue,
+                                     int argc, JSValueConst* argv, int function) noexcept {
+        try {
+            switch (function) {
+            case SendEvent: return sendEvent(context, thisValue, argc, argv);
+            case ResolveRequest: return resolveRequest(context, thisValue, argc, argv);
+            case RejectRequest: return rejectRequest(context, thisValue, argc, argv);
+            case StartRequest: return startRequest(context, thisValue, argc, argv);
+            case AbortRequest: return abortRequest(context, thisValue, argc, argv);
+            case BufferFromString: return bufferFromString(context, thisValue, argc, argv);
+            case BufferToString: return bufferToString(context, thisValue, argc, argv);
+            case BufferConcat: return bufferConcat(context, thisValue, argc, argv);
+            case BufferLength: return bufferLength(context, thisValue, argc, argv);
+            case Md5: return md5(context, thisValue, argc, argv);
+            case AesEncrypt: return aesEncrypt(context, thisValue, argc, argv);
+            case RsaEncrypt: return rsaEncrypt(context, thisValue, argc, argv);
+            case RandomBytes: return randomBytes(context, thisValue, argc, argv);
+            case ZeroBytes: return zeroBytes(context, thisValue, argc, argv);
+            case Deflate: return deflate(context, thisValue, argc, argv);
+            case Inflate: return inflate(context, thisValue, argc, argv);
+            default: return JS_ThrowInternalError(context, "unknown native bridge function");
+            }
+        } catch (const std::exception& error) {
+            return JS_ThrowInternalError(context, "native bridge failure: %s", error.what());
+        } catch (...) {
+            return JS_ThrowInternalError(context, "native bridge failure");
+        }
+    }
+
+    static int interrupt(JSRuntime*, void* opaque) {
+        const auto* engine = static_cast<const QuickJsEngine*>(opaque);
+        return engine->executionActive_ && std::chrono::steady_clock::now() >= engine->deadline_;
+    }
+
+    static void promiseRejectionTracker(JSContext* context, JSValueConst promise,
+                                        JSValueConst reason, bool isHandled,
+                                        void* opaque) noexcept {
+        auto* engine = static_cast<QuickJsEngine*>(opaque);
+        try {
+            const auto key = reinterpret_cast<quintptr>(JS_VALUE_GET_PTR(promise));
+            if (isHandled) {
+                const auto it = engine->unhandledRejections_.find(key);
+                if (it != engine->unhandledRejections_.end()) {
+                    JS_FreeValue(context, it->promise);
+                    engine->unhandledRejections_.erase(it);
+                }
+                return;
+            }
+            const auto existing = engine->unhandledRejections_.find(key);
+            if (existing != engine->unhandledRejections_.end()) return;
+            if (engine->unhandledRejections_.size() >= MaxUnhandledRejections) {
+                engine->rejectionLimitExceeded_ = true;
+                return;
+            }
+
+            QString message;
+            JSValue stringValue = JS_ToString(context, reason);
+            const auto freeString = qScopeGuard([context, &stringValue] {
+                JS_FreeValue(context, stringValue);
+            });
+            if (JS_IsException(stringValue)) {
+                JSValue conversionError = JS_GetException(context);
+                JS_FreeValue(context, conversionError);
+                message = QStringLiteral("JavaScript promise rejected with a non-string value.");
+            } else {
+                bool converted = false;
+                message = toQString(context, stringValue, &converted).left(4096);
+                if (!converted) {
+                    JSValue conversionError = JS_GetException(context);
+                    JS_FreeValue(context, conversionError);
+                    message = QStringLiteral("JavaScript promise rejection could not be converted.");
+                }
+            }
+            JSValue rootedPromise = JS_DupValue(context, promise);
+            try {
+                engine->unhandledRejections_.insert(
+                    key, UnhandledRejection{rootedPromise, std::move(message)});
+            } catch (...) {
+                JS_FreeValue(context, rootedPromise);
+                throw;
+            }
+        } catch (...) {
+            engine->rejectionTrackerFailed_ = true;
+        }
+    }
+
+    void clearUnhandledRejections() {
+        if (context_) {
+            for (auto& rejection : unhandledRejections_) {
+                JS_FreeValue(context_, rejection.promise);
+            }
+        }
+        unhandledRejections_.clear();
+        rejectionLimitExceeded_ = false;
+        rejectionTrackerFailed_ = false;
+    }
+
+    void beginExecution() {
+        if (executionDepth_++ == 0) {
+            executionActive_ = true;
+            deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        }
+    }
+
+    void endExecution() {
+        if (executionDepth_ > 0 && --executionDepth_ == 0) executionActive_ = false;
+    }
+
+    bool pumpJobs(QString* error) {
+        const auto reportUnhandledRejection = [this, error] {
+            if (rejectionTrackerFailed_) {
+                if (error) *error = QStringLiteral("Promise rejection tracking failed.");
+                return false;
+            }
+            if (rejectionLimitExceeded_) {
+                if (error) *error = QStringLiteral("Too many unhandled Promise rejections.");
+                return false;
+            }
+            if (unhandledRejections_.isEmpty()) return true;
+            if (error) {
+                *error = QStringLiteral("Unhandled Promise rejection: %1")
+                             .arg(unhandledRejections_.constBegin()->message);
+            }
+            return false;
+        };
+        for (int count = 0; count < MaxPendingJobsPerTurn; ++count) {
+            JSContext* jobContext = nullptr;
+            const int result = JS_ExecutePendingJob(runtime_, &jobContext);
+            if (result == 0) return reportUnhandledRejection();
+            if (result < 0) {
+                if (error) *error = takeException(jobContext ? jobContext : context_);
+                return false;
+            }
+        }
+        if (JS_IsJobPending(runtime_)) {
+            if (error) *error = QStringLiteral("JavaScript Promise job limit exceeded.");
+            return false;
+        }
+        return reportUnhandledRejection();
+    }
+
+    bool callGlobal(const QString& name, const QStringList& arguments, bool* booleanResult,
+                    QString* error) {
+        if (!context_) {
+            if (error) *error = QStringLiteral("JavaScript runtime is unavailable.");
+            return false;
+        }
+        beginExecution();
+        JSValue global = JS_GetGlobalObject(context_);
+        const QByteArray encodedName = name.toUtf8();
+        JSValue function = JS_GetPropertyStr(context_, global, encodedName.constData());
+        if (JS_IsException(function)) {
+            JS_FreeValue(context_, function);
+            JS_FreeValue(context_, global);
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        if (!JS_IsFunction(context_, function)) {
+            JS_FreeValue(context_, function);
+            JS_FreeValue(context_, global);
+            endExecution();
+            if (error) *error = QStringLiteral("JavaScript bridge function is unavailable: %1.").arg(name);
+            return false;
+        }
+        std::vector<JSValue> values;
+        values.reserve(static_cast<size_t>(arguments.size()));
+        for (const auto& argument : arguments) {
+            JSValue value = fromQString(context_, argument);
+            if (JS_IsException(value)) {
+                for (auto& previous : values) JS_FreeValue(context_, previous);
+                JS_FreeValue(context_, value);
+                JS_FreeValue(context_, function);
+                JS_FreeValue(context_, global);
+                if (error) *error = takeException(context_);
+                endExecution();
+                return false;
+            }
+            values.push_back(value);
+        }
+        JSValue result = JS_Call(context_, function, global, static_cast<int>(values.size()), values.data());
+        for (auto& value : values) JS_FreeValue(context_, value);
+        JS_FreeValue(context_, function);
+        JS_FreeValue(context_, global);
+        if (JS_IsException(result)) {
+            JS_FreeValue(context_, result);
+            if (error) *error = takeException(context_);
+            endExecution();
+            return false;
+        }
+        if (booleanResult) {
+            const int converted = JS_ToBool(context_, result);
+            if (converted < 0) {
+                JS_FreeValue(context_, result);
+                if (error) *error = takeException(context_);
+                endExecution();
+                return false;
+            }
+            *booleanResult = converted != 0;
+        }
+        JS_FreeValue(context_, result);
+        const bool succeeded = pumpJobs(error);
+        endExecution();
+        return succeeded;
+    }
+
+    bool installBridge() {
+        JSValue bridge = JS_NewObject(context_);
+        if (JS_IsException(bridge)) {
+            initializationError_ = takeException(context_);
+            return false;
+        }
+        struct FunctionEntry { const char* name; int function; int arguments; };
+        const FunctionEntry functions[] = {
+            {"sendEvent", SendEvent, 2},
+            {"resolveRequest", ResolveRequest, 2},
+            {"rejectRequest", RejectRequest, 2},
+            {"startRequest", StartRequest, 3},
+            {"abortRequest", AbortRequest, 1},
+            {"bufferFromString", BufferFromString, 2},
+            {"bufferToString", BufferToString, 2},
+            {"bufferConcat", BufferConcat, 1},
+            {"bufferLength", BufferLength, 1},
+            {"md5", Md5, 1},
+            {"aesEncrypt", AesEncrypt, 4},
+            {"rsaEncrypt", RsaEncrypt, 2},
+            {"randomBytes", RandomBytes, 1},
+            {"zeroBytes", ZeroBytes, 1},
+            {"deflate", Deflate, 1},
+            {"inflate", Inflate, 1},
+        };
+        for (const auto& function : functions) {
+            JSValue callback = JS_NewCFunctionMagic(
+                context_, &QuickJsEngine::guardedBridgeCall, function.name,
+                function.arguments, JS_CFUNC_generic_magic, function.function);
+            if (JS_IsException(callback) ||
+                JS_SetPropertyStr(context_, bridge, function.name, callback) < 0) {
+                if (JS_IsException(callback)) JS_FreeValue(context_, callback);
+                JS_FreeValue(context_, bridge);
+                initializationError_ = takeException(context_);
+                return false;
+            }
+        }
+        JSValue global = JS_GetGlobalObject(context_);
+        if (JS_IsException(global)) {
+            JS_FreeValue(context_, bridge);
+            JS_FreeValue(context_, global);
+            initializationError_ = takeException(context_);
+            return false;
+        }
+        const int installed = JS_SetPropertyStr(context_, global, "__lf_bridge", bridge);
+        JS_FreeValue(context_, global);
+        if (installed < 0) {
+            initializationError_ = takeException(context_);
+            return false;
+        }
+        return true;
+    }
+
+    Callbacks callbacks_;
+    struct UnhandledRejection {
+        JSValue promise{JS_UNDEFINED};
+        QString message;
+    };
+    JSRuntime* runtime_{nullptr};
+    JSContext* context_{nullptr};
+    QString initializationError_;
+    std::chrono::steady_clock::time_point deadline_{};
+    QHash<quintptr, UnhandledRejection> unhandledRejections_;
+    int executionDepth_{0};
+    bool valid_{false};
+    bool executionActive_{false};
+    bool rejectionLimitExceeded_{false};
+    bool rejectionTrackerFailed_{false};
 };
 
 const QString bootstrapScript = QStringLiteral(R"JS(
 (function () {
     const root = this
+    // Legacy sources execute in a browser preload and commonly access
+    // globalThis.lx. QJSEngine does not provide that alias consistently.
+    root.globalThis = root
+    // LX scripts routinely log from request callbacks. Logging must not turn a
+    // recoverable network failure into a ReferenceError or leak signed URLs.
+    root.console = { log() {}, info() {}, warn() {}, error() {}, debug() {}, trace() {}, time() {}, timeEnd() {}, clear() {} }
     const handlers = Object.create(null)
     const eventNames = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' }
+    let updateAlertSent = false
     root.lx = {
         version: '2.0.0',
         env: 'desktop',
@@ -198,6 +782,18 @@ const QString bootstrapScript = QStringLiteral(R"JS(
         },
         send(name, data) {
             if (!(name in eventNames)) return Promise.reject(new Error('unsupported event'))
+            if (name === eventNames.updateAlert) {
+                if (updateAlertSent) return Promise.reject(new Error('The update alert can only be called once.'))
+                if (!data || typeof data !== 'object' || typeof data.log !== 'string') {
+                    return Promise.reject(new Error('log is required.'))
+                }
+                updateAlertSent = true
+                data = {
+                    log: data.log.length > 1024 ? data.log.substring(0, 1024) + '...' : data.log,
+                    updateUrl: typeof data.updateUrl === 'string' && data.updateUrl.length <= 1024 &&
+                               /^https?:\/\/[^\s]+$/.test(data.updateUrl) ? data.updateUrl : undefined
+                }
+            }
             root.__lf_last_event = { name, data: data === undefined ? null : data }
             if (__lf_bridge && typeof __lf_bridge.sendEvent === 'function') {
                 __lf_bridge.sendEvent(name, JSON.stringify(data === undefined ? null : data))
@@ -232,6 +828,7 @@ const QString bootstrapScript = QStringLiteral(R"JS(
         return __lf_bridge.bufferToString(this.__lf_base64, encoding || 'utf8')
     }
     root.Buffer = {
+        isBuffer(value) { return value instanceof LFBuffer },
         from(value, encoding) {
             if (value && typeof value.__lf_base64 === 'string') return new LFBuffer(value.__lf_base64)
             if (typeof value === 'string') return new LFBuffer(__lf_bridge.bufferFromString(value, encoding || 'utf8'))
@@ -260,7 +857,14 @@ const QString bootstrapScript = QStringLiteral(R"JS(
                 if (!result) throw new Error('aesEncrypt failed')
                 return new LFBuffer(result)
             },
-            rsaEncrypt() { throw new Error('rsaEncrypt is not available in this runtime') }
+            rsaEncrypt(value, key) {
+                if (!value || typeof value.__lf_base64 !== 'string' || typeof key !== 'string') {
+                    throw new Error('invalid RSA arguments')
+                }
+                const result = __lf_bridge.rsaEncrypt(value.__lf_base64, key)
+                if (!result) throw new Error('rsaEncrypt failed')
+                return new LFBuffer(result)
+            }
         },
         buffer: {
             from(value, encoding) { return root.Buffer.from(value, encoding) },
@@ -298,7 +902,13 @@ const QString bootstrapScript = QStringLiteral(R"JS(
         if (packet.response && packet.response.rawBase64) {
             packet.response.raw = root.Buffer.from(packet.response.rawBase64, 'base64')
         }
+        if (packet.response) packet.response.body = packet.body
         callback(null, packet.response || null, packet.body)
+        return true
+    }
+    root.__lf_request_drop = function (requestId) {
+        if (typeof root.__lf_request_callbacks[requestId] !== 'function') return false
+        delete root.__lf_request_callbacks[requestId]
         return true
     }
     root.__lf_dispatch = function (requestId, json) {
@@ -336,48 +946,7 @@ bool containsString(const QJsonArray& values, const QString& expected) {
     return false;
 }
 
-#ifdef Q_OS_WIN
-QByteArray aesEncryptBytes(const QByteArray& input, const QByteArray& key, const QByteArray& iv, const QString& mode) {
-    const bool ecb = mode.endsWith(QStringLiteral("-ecb"));
-    const bool validMode = mode == QStringLiteral("aes-128-cbc") || mode == QStringLiteral("aes-192-cbc") ||
-                           mode == QStringLiteral("aes-256-cbc") || mode == QStringLiteral("aes-128-ecb") ||
-                           mode == QStringLiteral("aes-192-ecb") || mode == QStringLiteral("aes-256-ecb");
-    const bool validKey = (mode.contains(QStringLiteral("128")) && key.size() == 16) ||
-                          (mode.contains(QStringLiteral("192")) && key.size() == 24) ||
-                          (mode.contains(QStringLiteral("256")) && key.size() == 32);
-    if (!validMode || !validKey || (!ecb && iv.size() != 16)) return {};
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_AES_ALGORITHM, nullptr, 0) != 0) return {};
-    const auto closeAlgorithm = qScopeGuard([&] { BCryptCloseAlgorithmProvider(algorithm, 0); });
-    const wchar_t* chaining = ecb ? BCRYPT_CHAIN_MODE_ECB : BCRYPT_CHAIN_MODE_CBC;
-    if (BCryptSetProperty(algorithm, BCRYPT_CHAINING_MODE, reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(chaining)),
-                          static_cast<ULONG>((wcslen(chaining) + 1) * sizeof(wchar_t)), 0) != 0) return {};
-    DWORD objectLength = 0;
-    DWORD resultLength = 0;
-    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength),
-                          &resultLength, 0) != 0) return {};
-    std::vector<UCHAR> object(objectLength);
-    BCRYPT_KEY_HANDLE handle = nullptr;
-    if (BCryptGenerateSymmetricKey(algorithm, &handle, object.data(), objectLength,
-                                   reinterpret_cast<PUCHAR>(const_cast<char*>(key.constData())),
-                                   static_cast<ULONG>(key.size()), 0) != 0) return {};
-    const auto destroyKey = qScopeGuard([&] { BCryptDestroyKey(handle); });
-    QByteArray mutableIv = iv;
-    ULONG outputLength = 0;
-    const auto inputData = reinterpret_cast<PUCHAR>(const_cast<char*>(input.constData()));
-    const auto ivData = mutableIv.isEmpty() ? nullptr : reinterpret_cast<PUCHAR>(mutableIv.data());
-    if (BCryptEncrypt(handle, inputData, static_cast<ULONG>(input.size()), nullptr, ivData,
-                      static_cast<ULONG>(mutableIv.size()), nullptr, 0, &outputLength, BCRYPT_BLOCK_PADDING) != 0) return {};
-    QByteArray output(static_cast<qsizetype>(outputLength), Qt::Uninitialized);
-    mutableIv = iv;
-    if (BCryptEncrypt(handle, inputData, static_cast<ULONG>(input.size()), nullptr,
-                      mutableIv.isEmpty() ? nullptr : reinterpret_cast<PUCHAR>(mutableIv.data()),
-                      static_cast<ULONG>(mutableIv.size()), reinterpret_cast<PUCHAR>(output.data()), outputLength,
-                      &outputLength, BCRYPT_BLOCK_PADDING) != 0) return {};
-    output.resize(static_cast<qsizetype>(outputLength));
-    return output;
-}
-#endif
+
 
 std::optional<QByteArray> decodePluginSource(const QByteArray& encoded, QString* error) {
     if (!encoded.startsWith("gz_")) return encoded;
@@ -467,17 +1036,51 @@ private:
         QString type;
     };
 
-    void startNetworkRequest(const QString& requestId, const QString& url, const QString& optionsJson) {
+    struct PendingTerminal {
+        quint64 generation{0};
+        QString requestId;
+        QString value;
+        bool resolved{false};
+    };
+
+    void queueTerminal(const QString& requestId, const QString& value, bool resolved) {
+        if (!pending_.contains(requestId) || queuedTerminalRequestIds_.contains(requestId)) return;
+        queuedTerminalRequestIds_.insert(requestId);
+        pendingTerminals_.push_back({runtimeGeneration_, requestId, value, resolved});
+    }
+
+    void drainTerminals() {
+        if (drainingTerminals_) return;
+        drainingTerminals_ = true;
+        const auto finishDrain = qScopeGuard([this] { drainingTerminals_ = false; });
+        while (!pendingTerminals_.isEmpty()) {
+            PendingTerminal terminal = pendingTerminals_.takeFirst();
+            queuedTerminalRequestIds_.remove(terminal.requestId);
+            if (terminal.generation != runtimeGeneration_) continue;
+            if (terminal.resolved) handleResolved(terminal.requestId, terminal.value);
+            else handleRejected(terminal.requestId, terminal.value);
+        }
+    }
+
+    QString startNetworkRequest(const QString& requestId, const QString& url,
+                                const QString& optionsJson) {
         if (!engine_ || pendingNetwork_.size() >= MaxPendingNetworkRequests) {
-            completeNetworkRequest(requestId, QStringLiteral("request capacity exceeded"), {});
-            return;
+            return QStringLiteral("request capacity exceeded");
+        }
+        if (requestId.isEmpty() || requestId.toUtf8().size() > 256) {
+            return QStringLiteral("invalid network request id");
+        }
+        if (pendingNetwork_.contains(requestId)) {
+            return QStringLiteral("duplicate network request id");
         }
         const QUrl parsedUrl(url);
         if (!parsedUrl.isValid() ||
             (parsedUrl.scheme() != QStringLiteral("http") && parsedUrl.scheme() != QStringLiteral("https")) ||
             parsedUrl.host().isEmpty() || url.size() > MaxUrlBytes) {
-            completeNetworkRequest(requestId, QStringLiteral("invalid request URL"), {});
-            return;
+            return QStringLiteral("invalid request URL");
+        }
+        if (optionsJson.toUtf8().size() > MaxNetworkRequestBytes) {
+            return QStringLiteral("request options exceed the 8 MiB limit");
         }
 
         QJsonParseError parseError;
@@ -487,19 +1090,34 @@ private:
                                         : QJsonObject{};
         QNetworkRequest networkRequest(parsedUrl);
         const QJsonObject headers = options.value(QStringLiteral("headers")).toObject();
+        if (headers.size() > 128) {
+            return QStringLiteral("request header count exceeded");
+        }
+        qsizetype headerBytes = 0;
         for (auto it = headers.begin(); it != headers.end(); ++it) {
-            if (it.value().isString()) networkRequest.setRawHeader(it.key().toUtf8(), it.value().toString().toUtf8());
+            if (!it.value().isString()) continue;
+            const QByteArray name = it.key().toUtf8();
+            const QByteArray value = it.value().toString().toUtf8();
+            headerBytes += name.size() + value.size();
+            if (headerBytes > 64 * 1024 || name.contains('\r') || name.contains('\n') ||
+                value.contains('\r') || value.contains('\n')) {
+                return QStringLiteral("request headers are invalid or too large");
+            }
+            networkRequest.setRawHeader(name, value);
         }
 
         const int timeout = qBound(1, options.value(QStringLiteral("timeout")).toInt(60000), 60000);
         networkRequest.setTransferTimeout(timeout);
         QByteArray body;
+        QHttpMultiPart* multiPart = nullptr;
         if (options.value(QStringLiteral("body")).isString()) {
             body = options.value(QStringLiteral("body")).toString().toUtf8();
-        } else if (options.value(QStringLiteral("form")).isObject() || options.value(QStringLiteral("formData")).isObject()) {
-            const QJsonObject form = options.value(QStringLiteral("form")).toObject().isEmpty()
-                                         ? options.value(QStringLiteral("formData")).toObject()
-                                         : options.value(QStringLiteral("form")).toObject();
+        } else if (options.value(QStringLiteral("body")).isObject()) {
+            const auto encoded = options.value(QStringLiteral("body")).toObject()
+                                     .value(QStringLiteral("__lf_base64")).toString();
+            body = QByteArray::fromBase64(encoded.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+        } else if (options.value(QStringLiteral("form")).isObject()) {
+            const QJsonObject form = options.value(QStringLiteral("form")).toObject();
             QUrlQuery query;
             for (auto it = form.begin(); it != form.end(); ++it) query.addQueryItem(it.key(), it.value().toString());
             body = query.toString(QUrl::FullyEncoded).toUtf8();
@@ -507,26 +1125,91 @@ private:
                 networkRequest.setHeader(QNetworkRequest::ContentTypeHeader,
                                          QStringLiteral("application/x-www-form-urlencoded"));
             }
+        } else if (options.value(QStringLiteral("formData")).isObject()) {
+            const QJsonObject formData = options.value(QStringLiteral("formData")).toObject();
+            if (formData.size() > 64) {
+                return QStringLiteral("multipart field limit exceeded");
+            }
+            multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+            qsizetype totalBytes = 0;
+            for (auto it = formData.begin(); it != formData.end(); ++it) {
+                if (it.key().isEmpty() || it.key().size() > 256 || it.key().contains(QLatin1Char('"')) ||
+                    it.key().contains(QLatin1Char('\r')) || it.key().contains(QLatin1Char('\n'))) {
+                    delete multiPart;
+                    return QStringLiteral("invalid multipart field name");
+                }
+                QByteArray value;
+                if (it.value().isObject() &&
+                    it.value().toObject().value(QStringLiteral("__lf_base64")).isString()) {
+                    value = QByteArray::fromBase64(
+                        it.value().toObject().value(QStringLiteral("__lf_base64")).toString().toLatin1(),
+                        QByteArray::AbortOnBase64DecodingErrors);
+                } else if (it.value().isString()) {
+                    value = it.value().toString().toUtf8();
+                } else if (it.value().isBool()) {
+                    value = it.value().toBool() ? QByteArrayLiteral("true") : QByteArrayLiteral("false");
+                } else if (it.value().isDouble()) {
+                    value = QByteArray::number(it.value().toDouble(), 'g', 16);
+                } else {
+                    value = QJsonDocument(QJsonObject{{QStringLiteral("value"), it.value()}})
+                                .toJson(QJsonDocument::Compact);
+                }
+                totalBytes += value.size();
+                if (totalBytes > MaxNetworkResponseBytes) {
+                    delete multiPart;
+                    return QStringLiteral("multipart body exceeds the 8 MiB limit");
+                }
+                QHttpPart part;
+                part.setRawHeader("Content-Disposition",
+                                  QByteArrayLiteral("form-data; name=\"") + it.key().toUtf8() +
+                                      QByteArrayLiteral("\""));
+                part.setBody(value);
+                multiPart->append(part);
+            }
+        }
+        if (!multiPart && body.size() > MaxNetworkRequestBytes) {
+            return QStringLiteral("request body exceeds the 8 MiB limit");
         }
 
         const QByteArray method = options.value(QStringLiteral("method")).toString(QStringLiteral("get"))
                                       .toUpper()
                                       .toUtf8();
+        static const QRegularExpression methodPattern(QStringLiteral("^[A-Z][A-Z0-9-]{0,31}$"));
+        if (!methodPattern.match(QString::fromLatin1(method)).hasMatch()) {
+            delete multiPart;
+            return QStringLiteral("request method is invalid");
+        }
         QNetworkReply* reply = nullptr;
-        if (method == "GET") reply = network_->get(networkRequest);
+        if (multiPart && method == "POST") reply = network_->post(networkRequest, multiPart);
+        else if (multiPart && method == "PUT") reply = network_->put(networkRequest, multiPart);
+        else if (multiPart) {
+            delete multiPart;
+            return QStringLiteral("multipart requires POST or PUT");
+        } else if (method == "GET") reply = network_->get(networkRequest);
         else if (method == "POST") reply = network_->post(networkRequest, body);
         else if (method == "PUT") reply = network_->put(networkRequest, body);
         else if (method == "DELETE") reply = network_->deleteResource(networkRequest);
         else reply = network_->sendCustomRequest(networkRequest, method, body);
         if (!reply) {
-            completeNetworkRequest(requestId, QStringLiteral("unable to create network request"), {});
-            return;
+            delete multiPart;
+            return QStringLiteral("unable to create network request");
         }
+        if (multiPart) multiPart->setParent(reply);
+        reply->setReadBufferSize(MaxNetworkResponseBytes + 1);
+        connect(reply, &QNetworkReply::readyRead, &owner_, [reply] {
+            if (reply->bytesAvailable() <= MaxNetworkResponseBytes) return;
+            reply->setProperty("listenfreeResponseLimitExceeded", true);
+            reply->abort();
+        });
         pendingNetwork_.insert(requestId, reply);
-        if (!activePluginRequest_.isEmpty()) pluginNetworkRequests_[activePluginRequest_].insert(requestId);
+        if (!activePluginRequest_.isEmpty()) {
+            pluginNetworkRequests_[activePluginRequest_].insert(requestId);
+            networkPluginRequests_.insert(requestId, activePluginRequest_);
+        }
         connect(reply, &QNetworkReply::finished, &owner_, [this, requestId, reply] {
             finishNetworkRequest(requestId, reply);
         });
+        return {};
     }
 
     void abortNetworkRequest(const QString& requestId) {
@@ -534,10 +1217,13 @@ private:
         if (it == pendingNetwork_.end()) return;
         QNetworkReply* reply = it.value();
         pendingNetwork_.erase(it);
-        for (auto parentIt = pluginNetworkRequests_.begin(); parentIt != pluginNetworkRequests_.end();) {
-            parentIt.value().remove(requestId);
-            if (parentIt.value().isEmpty()) parentIt = pluginNetworkRequests_.erase(parentIt);
-            else ++parentIt;
+        const QString pluginRequestId = networkPluginRequests_.take(requestId);
+        if (!pluginRequestId.isEmpty()) {
+            auto parentIt = pluginNetworkRequests_.find(pluginRequestId);
+            if (parentIt != pluginNetworkRequests_.end()) {
+                parentIt.value().remove(requestId);
+                if (parentIt.value().isEmpty()) pluginNetworkRequests_.erase(parentIt);
+            }
         }
         if (reply) {
             QObject::disconnect(reply, nullptr, &owner_, nullptr);
@@ -548,19 +1234,25 @@ private:
 
     void finishNetworkRequest(const QString& requestId, QNetworkReply* reply) {
         if (!pendingNetwork_.remove(requestId)) return;
-        for (auto parentIt = pluginNetworkRequests_.begin(); parentIt != pluginNetworkRequests_.end();) {
-            parentIt.value().remove(requestId);
-            if (parentIt.value().isEmpty()) parentIt = pluginNetworkRequests_.erase(parentIt);
-            else ++parentIt;
+        const QString pluginRequestId = networkPluginRequests_.take(requestId);
+        if (!pluginRequestId.isEmpty()) {
+            auto parentIt = pluginNetworkRequests_.find(pluginRequestId);
+            if (parentIt != pluginNetworkRequests_.end()) {
+                parentIt.value().remove(requestId);
+                if (parentIt.value().isEmpty()) pluginNetworkRequests_.erase(parentIt);
+            }
         }
         const QByteArray raw = reply->readAll();
-        if (raw.size() > MaxNetworkResponseBytes) {
-            completeNetworkRequest(requestId, QStringLiteral("response exceeds the 8 MiB limit"), {});
+        if (reply->property("listenfreeResponseLimitExceeded").toBool() ||
+            raw.size() > MaxNetworkResponseBytes) {
+            completeNetworkRequestForPlugin(
+                requestId, pluginRequestId,
+                QStringLiteral("response exceeds the 8 MiB limit"), {});
             reply->deleteLater();
             return;
         }
         if (reply->error() != QNetworkReply::NoError) {
-            completeNetworkRequest(requestId, reply->errorString(), {});
+            completeNetworkRequestForPlugin(requestId, pluginRequestId, reply->errorString(), {});
             reply->deleteLater();
             return;
         }
@@ -581,26 +1273,88 @@ private:
         response.insert(QStringLiteral("headers"), responseHeaders);
         response.insert(QStringLiteral("bytes"), raw.size());
         response.insert(QStringLiteral("rawBase64"), QString::fromLatin1(raw.toBase64()));
-        completeNetworkRequest(requestId, {}, QJsonObject{{QStringLiteral("response"), response},
-                                                          {QStringLiteral("body"), body}});
+        completeNetworkRequestForPlugin(
+            requestId, pluginRequestId, {},
+            QJsonObject{{QStringLiteral("response"), response},
+                        {QStringLiteral("body"), body}});
         reply->deleteLater();
+    }
+
+    void completeNetworkRequestForPlugin(const QString& requestId,
+                                         const QString& pluginRequestId,
+                                         const QString& error,
+                                         const QJsonObject& packet) {
+        const QString previousActiveRequest = activePluginRequest_;
+        activePluginRequest_ = pluginRequestId;
+        completeNetworkRequest(requestId, error, packet);
+        activePluginRequest_ = previousActiveRequest;
     }
 
     void completeNetworkRequest(const QString& requestId, const QString& error, const QJsonObject& packet) {
         if (!engine_) return;
-        const QJSValue complete = engine_->globalObject().property(QStringLiteral("__lf_request_complete"));
-        if (!complete.isCallable()) return;
         const QString packetJson = QString::fromUtf8(QJsonDocument(packet).toJson(QJsonDocument::Compact));
-        complete.call({engine_->toScriptValue(requestId), engine_->toScriptValue(error),
-                       engine_->toScriptValue(packetJson)});
+        QString scriptError;
+        if (!engine_->completeNetworkRequest(requestId, error, packetJson, &scriptError)) {
+            failRuntime(scriptError);
+            return;
+        }
+        drainTerminals();
+        if (initialized_ && !loadingRequest_.isEmpty())
+            finishLoad(std::exchange(loadingRequest_, {}));
     }
 
-    void respond(const QString& requestId, MessageType type, QJsonObject payload) {
+    bool abortPluginNetworkRequests(const QString& pluginRequestId, QString* error) {
+        const auto networkIds = pluginNetworkRequests_.take(pluginRequestId);
+        for (const auto& networkId : networkIds) {
+            if (engine_ && !engine_->dropNetworkRequest(networkId, error)) return false;
+            abortNetworkRequest(networkId);
+        }
+        return true;
+    }
+
+    bool rejectPendingRequests(const QString& code, const QString& message) {
+        QStringList requestIds = pending_.keys();
+        if (!loadingRequest_.isEmpty()) requestIds.append(loadingRequest_);
+        for (const auto& requestId : requestIds) {
+            if (!pending_.contains(requestId)) continue;
+            QString cleanupError;
+            if (!abortPluginNetworkRequests(requestId, &cleanupError)) {
+                failRuntime(cleanupError);
+                return false;
+            }
+            pending_.remove(requestId);
+            respondError(requestId, code, message);
+        }
+        return true;
+    }
+
+    void failRuntime(const QString& message) {
+        const QString boundedMessage = message.isEmpty()
+                                           ? QStringLiteral("Plugin JavaScript runtime failed.")
+                                           : message.left(4096);
+        QStringList requestIds = pending_.keys();
+        if (!loadingRequest_.isEmpty()) requestIds.append(loadingRequest_);
+        pending_.clear();
+        reset();
+        for (const auto& requestId : requestIds) {
+            respondError(requestId, QStringLiteral("plugin.runtime-failed"), boundedMessage);
+        }
+    }
+
+    bool respond(const QString& requestId, MessageType type, QJsonObject payload) {
         SourceMessage response;
         response.type = type;
         response.requestId = requestId;
         response.payload = std::move(payload);
+        const bool responseFits = SourceProtocol::encode(response).size() <= MaxProtocolFrameBytes;
+        if (!responseFits) {
+            response.type = MessageType::Error;
+            response.payload = errorPayload(
+                QStringLiteral("plugin.response-too-large"),
+                QStringLiteral("Plugin response exceeds the 1 MiB protocol limit."));
+        }
         emit owner_.responseReady(response);
+        return responseFits;
     }
 
     void respondError(const QString& requestId, const QString& code, const QString& message) {
@@ -608,6 +1362,10 @@ private:
     }
 
     void reset() {
+        loadingRequest_.clear();
+        ++runtimeGeneration_;
+        pendingTerminals_.clear();
+        queuedTerminalRequestIds_.clear();
         pending_.clear();
         for (auto reply : std::as_const(pendingNetwork_)) {
             if (!reply) continue;
@@ -617,11 +1375,12 @@ private:
         }
         pendingNetwork_.clear();
         pluginNetworkRequests_.clear();
+        networkPluginRequests_.clear();
         activePluginRequest_.clear();
+        network_->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
         initialized_ = false;
         initPayload_ = {};
-        dispatch_ = {};
-        bridge_.reset();
+        updateAlert_ = {};
         engine_.reset();
     }
 
@@ -651,67 +1410,109 @@ private:
             return;
         }
 
+        rejectPendingRequests(QStringLiteral("plugin.reloaded"),
+                              QStringLiteral("Plugin was replaced while the request was pending."));
         reset();
-        engine_ = std::make_unique<QJSEngine>();
-        bridge_ = std::make_unique<PluginBridge>();
-        QObject::connect(bridge_.get(), &PluginBridge::eventSent, [this](const QString& name, const QString& json) {
-            handleEvent(name, json);
+        const QJsonObject proxy = request.payload.value(QStringLiteral("proxy")).toObject();
+        if (!proxy.isEmpty()) {
+            const QString host = proxy.value(QStringLiteral("host")).toString();
+            const int port = proxy.value(QStringLiteral("port")).toInt();
+            if (host.isEmpty() || host.size() > 253 || port < 1 || port > 65535) {
+                respondError(request.requestId, QStringLiteral("plugin.invalid-proxy"),
+                             QStringLiteral("Proxy host or port is invalid."));
+                return;
+            }
+            network_->setProxy(QNetworkProxy(QNetworkProxy::HttpProxy, host,
+                                             static_cast<quint16>(port)));
+        }
+        engine_ = std::make_unique<QuickJsEngine>(QuickJsEngine::Callbacks{
+            [this](const QString& name, const QString& json) { handleEvent(name, json); },
+            [this](const QString& id, const QString& json) { queueTerminal(id, json, true); },
+            [this](const QString& id, const QString& message) { queueTerminal(id, message, false); },
+            [this](const QString& id, const QString& url, const QString& options) {
+                return startNetworkRequest(id, url, options);
+            },
+            [this](const QString& id) { abortNetworkRequest(id); },
         });
-        QObject::connect(bridge_.get(), &PluginBridge::requestResolved,
-                         [this](const QString& id, const QString& json) { handleResolved(id, json); });
-        QObject::connect(bridge_.get(), &PluginBridge::requestRejected,
-                         [this](const QString& id, const QString& message) { handleRejected(id, message); });
-        QObject::connect(bridge_.get(), &PluginBridge::requestStarted,
-                         [this](const QString& id, const QString& url, const QString& options) {
-                             startNetworkRequest(id, url, options);
-                         });
-        QObject::connect(bridge_.get(), &PluginBridge::requestAborted,
-                         [this](const QString& id) { abortNetworkRequest(id); });
+        if (!engine_->isValid()) {
+            const QString runtimeError = engine_->initializationError();
+            reset();
+            respondError(request.requestId, QStringLiteral("plugin.runtime-failed"),
+                         runtimeError.isEmpty()
+                             ? QStringLiteral("Unable to create JavaScript runtime.")
+                             : runtimeError);
+            return;
+        }
+        QString scriptError;
+        if (!engine_->evaluate(bootstrapScript, info.absoluteFilePath(), &scriptError)) {
+            reset();
+            respondError(request.requestId, QStringLiteral("plugin.bootstrap-failed"), scriptError);
+            return;
+        }
+        if (!engine_->setScriptInfo(parseScriptMetadata(*source), &scriptError) ||
+            !engine_->evaluate(QString::fromUtf8(*source), info.absoluteFilePath(), &scriptError)) {
+            reset();
+            respondError(request.requestId, QStringLiteral("plugin.script-failed"), scriptError);
+            return;
+        }
+        QString dispatchError;
+        if (!engine_->hasDispatch(&dispatchError)) {
+            reset();
+            if (!dispatchError.isEmpty()) {
+                respondError(request.requestId, QStringLiteral("plugin.script-failed"),
+                             dispatchError);
+            } else {
+                respondError(request.requestId, QStringLiteral("plugin.init-missing"),
+                             QStringLiteral("Plugin request dispatcher is unavailable."));
+            }
+            return;
+        }
+        if (!initialized_ && !pendingNetwork_.isEmpty()) {
+            loadingRequest_ = request.requestId;
+            const auto generation = runtimeGeneration_;
+            QTimer::singleShot(30000, &owner_, [this, generation] {
+                if (generation != runtimeGeneration_ || loadingRequest_.isEmpty()) return;
+                const auto id = std::exchange(loadingRequest_, {});
+                reset();
+                respondError(id, QStringLiteral("plugin.init-timeout"), QStringLiteral("音源初始化超时"));
+            });
+            return;
+        }
+        finishLoad(request.requestId);
+    }
 
-        engine_->globalObject().setProperty(QStringLiteral("__lf_bridge"), engine_->newQObject(bridge_.get()));
-        const QJSValue bootstrap = engine_->evaluate(bootstrapScript, info.absoluteFilePath(), 1);
-        if (engine_->hasError()) {
-            const QJSValue error = engine_->catchError();
+    void finishLoad(const QString& requestId) {
+        if (!initialized_ ||
+            !initPayload_.value(QStringLiteral("status")).toBool(true)) {
+            QString diagnosticError;
+            const QString diagnosticEvent = engine_->lastEventName(&diagnosticError);
             reset();
-            respondError(request.requestId, QStringLiteral("plugin.bootstrap-failed"), scriptError(error));
+            if (!diagnosticError.isEmpty()) {
+                respondError(requestId, QStringLiteral("plugin.script-failed"),
+                             diagnosticError);
+                return;
+            }
+            respondError(requestId, QStringLiteral("plugin.init-missing"),
+                         diagnosticEvent.isEmpty()
+                             ? QStringLiteral("Plugin did not report a successful inited event.")
+                             : QStringLiteral("Plugin did not report a successful inited event; last event: %1.")
+                                   .arg(diagnosticEvent.left(32)));
             return;
         }
-        QJSValue lx = engine_->globalObject().property(QStringLiteral("lx"));
-        lx.setProperty(QStringLiteral("currentScriptInfo"), engine_->toScriptValue(parseScriptMetadata(*source).toVariantMap()));
-        const QJSValue result = engine_->evaluate(QString::fromUtf8(*source), info.absoluteFilePath(), 1);
-        if (engine_->hasError()) {
-            const QJSValue error = engine_->catchError();
+        QJsonObject responsePayload{
+            {QStringLiteral("ok"), true},
+            {QStringLiteral("sources"), initPayload_.value(QStringLiteral("sources"))}};
+        if (!updateAlert_.isEmpty()) {
+            responsePayload.insert(QStringLiteral("updateAlert"), updateAlert_);
+        }
+        if (!respond(requestId, MessageType::Result, std::move(responsePayload))) {
             reset();
-            respondError(request.requestId, QStringLiteral("plugin.script-failed"), scriptError(error));
-            return;
         }
-        const QJSValue lastEvent = engine_->globalObject().property(QStringLiteral("__lf_last_event"));
-        if (!initialized_ && lastEvent.isObject()) {
-            const QString eventName = lastEvent.property(QStringLiteral("name")).toString();
-            const QVariant eventData = lastEvent.property(QStringLiteral("data")).toVariant();
-            const QJsonValue jsonValue = QJsonValue::fromVariant(eventData);
-            const QJsonDocument eventDocument = jsonValue.isObject()
-                                                     ? QJsonDocument(jsonValue.toObject())
-                                                     : QJsonDocument(QJsonArray{jsonValue});
-            handleEvent(eventName, jsonValue.isObject()
-                                      ? QString::fromUtf8(eventDocument.toJson(QJsonDocument::Compact))
-                                      : QString{});
-        }
-        dispatch_ = engine_->globalObject().property(QStringLiteral("__lf_dispatch"));
-        if (!initialized_ || !initPayload_.value(QStringLiteral("status")).toBool()) {
-            reset();
-            respondError(request.requestId, QStringLiteral("plugin.init-missing"),
-                         QStringLiteral("Plugin did not report a successful inited event."));
-            return;
-        }
-        respond(request.requestId, MessageType::Result,
-                {{QStringLiteral("ok"), true}, {QStringLiteral("sources"), initPayload_.value(QStringLiteral("sources"))}});
     }
 
     void unload(const SourceMessage& request) {
-        for (const auto& id : pending_.keys()) {
-            respondError(id, QStringLiteral("plugin.unloaded"), QStringLiteral("Plugin was unloaded."));
-        }
+        rejectPendingRequests(QStringLiteral("plugin.unloaded"),
+                              QStringLiteral("Plugin was unloaded."));
         reset();
         respond(request.requestId, MessageType::Result, {{QStringLiteral("ok"), true}});
     }
@@ -729,11 +1530,15 @@ private:
         const QString targetId = request.payload.value(QStringLiteral("requestId")).toString().isEmpty()
                                      ? request.requestId
                                      : request.payload.value(QStringLiteral("requestId")).toString();
+        QString cleanupError;
+        if (!abortPluginNetworkRequests(targetId, &cleanupError)) {
+            failRuntime(cleanupError);
+            return;
+        }
         pending_.remove(targetId);
-        const auto networkIds = pluginNetworkRequests_.take(targetId);
-        for (const auto& networkId : networkIds) abortNetworkRequest(networkId);
-        respondError(targetId, QStringLiteral("plugin.cancelled"), QStringLiteral("Plugin request was cancelled."));
-        respond(request.requestId, MessageType::Result, {{QStringLiteral("ok"), true}});
+        respond(request.requestId, MessageType::Result,
+                {{QStringLiteral("ok"), true}, {QStringLiteral("cancelled"), targetId}});
+        drainTerminals();
     }
 
     void resolve(const SourceMessage& request) {
@@ -774,11 +1579,21 @@ private:
         event.insert(QStringLiteral("info"), info);
         const QString previousActiveRequest = activePluginRequest_;
         activePluginRequest_ = request.requestId;
-        const QJSValue accepted = dispatch_.call({engine_->toScriptValue(request.requestId),
-                                                  engine_->toScriptValue(QString::fromUtf8(
-                                                      QJsonDocument(event).toJson(QJsonDocument::Compact)))});
+        QString scriptError;
+        const bool accepted = engine_->dispatch(
+            request.requestId,
+            QString::fromUtf8(QJsonDocument(event).toJson(QJsonDocument::Compact)), &scriptError);
         activePluginRequest_ = previousActiveRequest;
-        if (accepted.isError() || !accepted.toBool()) handleRejected(request.requestId, accepted.toString());
+        if (!accepted) {
+            if (!scriptError.isEmpty()) {
+                failRuntime(scriptError);
+                return;
+            }
+        }
+        drainTerminals();
+        if (!accepted && pending_.contains(request.requestId)) {
+            handleRejected(request.requestId, QStringLiteral("Plugin rejected the request."));
+        }
     }
 
     void handleEvent(const QString& name, const QString& json) {
@@ -788,12 +1603,32 @@ private:
         if (name == QStringLiteral("inited") && !initialized_) {
             initialized_ = true;
             initPayload_ = document.object();
+        } else if (name == QStringLiteral("updateAlert") && updateAlert_.isEmpty()) {
+            const auto payload = document.object();
+            const auto log = payload.value(QStringLiteral("log")).toString();
+            if (!log.isEmpty() && log.size() <= 1027) {
+                updateAlert_.insert(QStringLiteral("log"), log);
+                const auto updateUrl = payload.value(QStringLiteral("updateUrl")).toString();
+                const QUrl parsedUrl(updateUrl);
+                if (updateUrl.size() <= 1024 && parsedUrl.isValid() &&
+                    (parsedUrl.scheme() == QStringLiteral("http") ||
+                     parsedUrl.scheme() == QStringLiteral("https")) &&
+                    !parsedUrl.host().isEmpty()) {
+                    updateAlert_.insert(QStringLiteral("updateUrl"), updateUrl);
+                }
+                respond({}, MessageType::UpdateAlert, updateAlert_);
+            }
         }
     }
 
     void handleResolved(const QString& requestId, const QString& json) {
+        if (!pending_.contains(requestId)) return;
+        QString cleanupError;
+        if (!abortPluginNetworkRequests(requestId, &cleanupError)) {
+            failRuntime(cleanupError);
+            return;
+        }
         const auto pending = pending_.take(requestId);
-        if (pending.source.isEmpty()) return;
         QJsonParseError parseError;
         const QJsonValue value = QJsonValue::fromJson(json.toUtf8(), &parseError);
         if (parseError.error != QJsonParseError::NoError) {
@@ -849,21 +1684,32 @@ private:
     }
 
     void handleRejected(const QString& requestId, const QString& message) {
-        if (!pending_.remove(requestId)) return;
+        if (!pending_.contains(requestId)) return;
+        QString cleanupError;
+        if (!abortPluginNetworkRequests(requestId, &cleanupError)) {
+            failRuntime(cleanupError);
+            return;
+        }
+        pending_.remove(requestId);
         respondError(requestId, QStringLiteral("plugin.request-failed"), message);
     }
 
     PluginRuntime& owner_;
     std::unique_ptr<QNetworkAccessManager> network_;
-    std::unique_ptr<QJSEngine> engine_;
-    std::unique_ptr<PluginBridge> bridge_;
-    QJSValue dispatch_;
+    std::unique_ptr<QuickJsEngine> engine_;
     QJsonObject initPayload_;
+    QJsonObject updateAlert_;
+    QString loadingRequest_;
     QHash<QString, PendingRequest> pending_;
     QHash<QString, QNetworkReply*> pendingNetwork_;
     QHash<QString, QSet<QString>> pluginNetworkRequests_;
+    QHash<QString, QString> networkPluginRequests_;
+    QList<PendingTerminal> pendingTerminals_;
+    QSet<QString> queuedTerminalRequestIds_;
     QString activePluginRequest_;
+    quint64 runtimeGeneration_{0};
     bool initialized_{false};
+    bool drainingTerminals_{false};
 };
 
 PluginRuntime::PluginRuntime(QObject* parent) : QObject(parent), impl_(std::make_unique<Impl>(*this)) {
@@ -879,5 +1725,3 @@ void PluginRuntime::handle(const SourceMessage& request) {
 }
 
 } // namespace listenfree::sourcehost
-
-#include "plugin_runtime.moc"

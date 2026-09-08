@@ -3,6 +3,7 @@
 #include "domain/domain.h"
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -35,6 +36,13 @@ struct LocalFileFingerprint {
     std::filesystem::path canonicalPath;
     std::uintmax_t sizeBytes{0};
     std::int64_t modifiedMs{0};
+    std::string duplicateHash;
+    std::filesystem::path keeperPath;
+};
+
+struct LibraryFolder {
+    std::int64_t id{0};
+    std::filesystem::path path;
 };
 
 struct ScanRequest {
@@ -96,6 +104,14 @@ public:
     virtual std::optional<domain::Track> find(const domain::TrackId& id) = 0;
     virtual std::vector<domain::Track> search(const std::string& query) = 0;
     virtual std::vector<LocalFileFingerprint> localFiles() = 0;
+};
+
+class ILibraryFolderRepository {
+public:
+    virtual ~ILibraryFolderRepository() = default;
+    virtual std::vector<LibraryFolder> roots() = 0;
+    virtual bool add(const std::filesystem::path& path) = 0;
+    virtual bool remove(std::int64_t id, const std::filesystem::path& path) = 0;
 };
 
 class IPlaylistRepository {
@@ -177,6 +193,10 @@ class IEqualizerService {
 public:
     virtual ~IEqualizerService() = default;
     virtual bool supported() const noexcept = 0;
+    // Optional DSP controls.  Backends that do not expose a given effect may
+    // keep the default false implementation without widening the player port.
+    virtual bool setBandGain(std::size_t, float) { return false; }
+    virtual bool setReverb(float) { return false; }
 };
 
 class IOnlineProvider {

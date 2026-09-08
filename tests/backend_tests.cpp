@@ -10,9 +10,11 @@
 #include "sourcehost/sourcehost_client.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDataStream>
 #include <QFileInfo>
 #include <QFile>
+#include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QTcpServer>
@@ -26,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
+#include <iterator>
 #include <stdexcept>
 
 #ifdef Q_OS_WIN
@@ -89,6 +92,7 @@ private slots:
     void playerControllerProjectsMuteQueueAndLyrics();
     void databaseMigrationAndRepository();
     void databaseMigrationChecksumRejectsTampering();
+    void databaseUpgradesShippedDuplicateAliasSchema();
     void databasePortRepositories();
     void databaseTrackRelationsRoundTrip();
     void metadataReaderMapsRegularFile();
@@ -104,6 +108,10 @@ private slots:
     void libraryControllerPersistsScanBatches();
     void libraryControllerContainsFingerprintFailure();
     void libraryControllerSkipsUnchangedSizeAndMtime();
+    void libraryControllerPersistsAndUsesFolders();
+    void libraryAutoWatchFindsSettledFilesAndHonorsSwitch();
+    void libraryAutoWatchWaitsForManualScan();
+    void settingsControllerPersistsValues();
     void libraryScannerExcludesSymbolicLinks();
     void libraryScannerDeduplicatesOverlappingRoots();
     void sourceProtocolRoundTrip();
@@ -277,6 +285,52 @@ void BackendTests::databaseMigrationAndRepository() {
     QVERIFY(!database.isOpen());
 }
 
+void BackendTests::databaseUpgradesShippedDuplicateAliasSchema() {
+    using listenfree::infrastructure::database::Database;
+    QTemporaryDir temp;QVERIFY(temp.isValid());
+    const auto path=temp.filePath("shipped-v4.sqlite");
+    Database database;QVERIFY(database.open(path));
+    listenfree::domain::Track track;track.id=listenfree::domain::TrackId("keeper");track.title="Preserved track";
+    QVERIFY(database.upsertTrack(track));
+    QVERIFY(database.setSetting("portable.queue","{\"preserved\":true}"));
+    QVERIFY(database.setSetting("collections.v1","{\"lists\":[1,2]}"));
+    database.close();
+    const QString oldSql="CREATE TABLE IF NOT EXISTS duplicate_aliases (path TEXT PRIMARY KEY, keeper_id TEXT NOT NULL, keeper_path TEXT NOT NULL, hash TEXT NOT NULL, size_bytes INTEGER NOT NULL, modified_ms INTEGER NOT NULL)";
+    const auto oldChecksum=QString::fromLatin1(QCryptographicHash::hash(oldSql.toUtf8(),QCryptographicHash::Sha256).toHex());
+    QCOMPARE(oldChecksum,QString("9730c9c84b3dd5e4c8d9783d056aa8483f9f287bc0abc8f8167b5f83a3198412"));
+    const auto connectionName=QString("shipped-v4-fixture");
+    {
+        auto raw=QSqlDatabase::addDatabase("QSQLITE",connectionName);raw.setDatabaseName(path);QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        QVERIFY(query.exec("DROP TABLE duplicate_aliases"));QVERIFY(query.exec(oldSql));
+        QVERIFY(query.exec("INSERT INTO duplicate_aliases VALUES('duplicate.mp3','keeper','keeper.mp3','hash',123,456)"));
+        QVERIFY(query.exec("INSERT INTO duplicate_aliases VALUES('stale.mp3','removed-track','removed.mp3','old-hash',11,22)"));
+        query.prepare("UPDATE schema_migrations SET checksum=? WHERE version=4");query.addBindValue(oldChecksum);QVERIFY(query.exec());
+        raw.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    QVERIFY2(database.open(path),"The previously shipped v4 database must remain startable");
+    QVERIFY(database.migrate()); // main also calls migrate after open.
+    QCOMPARE(database.loadTracks().size(),std::size_t(1));
+    QCOMPARE(database.getSetting("portable.queue").value(),std::string("{\"preserved\":true}"));
+    QCOMPARE(database.getSetting("collections.v1").value(),std::string("{\"lists\":[1,2]}"));
+    database.close();QVERIFY(database.open(path));database.close();
+    {
+        auto raw=QSqlDatabase::addDatabase("QSQLITE",connectionName);raw.setDatabaseName(path);QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        QVERIFY(query.exec("SELECT path,hash,size_bytes,modified_ms FROM duplicate_aliases"));QVERIFY(query.next());
+        QCOMPARE(query.value(0).toString(),QString("duplicate.mp3"));QCOMPARE(query.value(1).toString(),QString("hash"));
+        QCOMPARE(query.value(2).toInt(),123);QCOMPARE(query.value(3).toInt(),456);QVERIFY(!query.next());
+        QVERIFY(query.exec("PRAGMA foreign_keys=ON"));
+        QVERIFY(query.exec("DELETE FROM tracks WHERE track_id='keeper'"));
+        QVERIFY(query.exec("SELECT COUNT(*) FROM duplicate_aliases"));QVERIFY(query.next());QCOMPARE(query.value(0).toInt(),0);
+        QVERIFY(query.exec("UPDATE schema_migrations SET checksum='unrecognized-v4' WHERE version=4"));
+        raw.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    QVERIFY(!database.open(path)); // The compatibility case does not disable validation.
+}
+
 void BackendTests::databaseMigrationChecksumRejectsTampering() {
     QTemporaryDir temp;
     QVERIFY(temp.isValid());
@@ -371,6 +425,7 @@ void BackendTests::databaseTrackRelationsRoundTrip() {
     listenfree::infrastructure::database::Database database;
     QVERIFY(database.open(temp.filePath(QStringLiteral("relations.sqlite"))));
     listenfree::infrastructure::database::TrackRepository repository(database);
+    listenfree::infrastructure::database::LibraryFolderRepository folders(database);
 
     listenfree::domain::Track track;
     track.id = listenfree::domain::TrackId("relations-track");
@@ -663,7 +718,8 @@ void BackendTests::libraryControllerPersistsScanBatches() {
     listenfree::infrastructure::database::TrackRepository repository(database);
     listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
         std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
-    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+    listenfree::qmlbridge::LibraryController controller(scanner, repository, nullptr,
+                                                         directory.filePath(QStringLiteral("controller.sqlite")));
 
     controller.scan({directory.path()});
 
@@ -675,10 +731,181 @@ void BackendTests::libraryControllerPersistsScanBatches() {
     QCOMPARE(stored.front().title, std::string("controller-track"));
 }
 
+void BackendTests::libraryControllerPersistsAndUsesFolders() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString root = QDir(directory.path()).canonicalPath();
+    QFile audio(QDir(root).filePath(QStringLiteral("folder-track.mp3")));
+    QVERIFY(audio.open(QIODevice::WriteOnly));
+    audio.write("folder");
+    audio.close();
+
+    QTemporaryDir otherDirectory;
+    QVERIFY(otherDirectory.isValid());
+    const QString otherRoot = QDir(otherDirectory.path()).canonicalPath();
+    QFile unrelatedAudio(QDir(otherRoot).filePath(QStringLiteral("unrelated-track.mp3")));
+    QVERIFY(unrelatedAudio.open(QIODevice::WriteOnly));
+    unrelatedAudio.write("unrelated");
+    unrelatedAudio.close();
+
+    listenfree::infrastructure::database::Database database;
+    const QString databasePath = directory.filePath(QStringLiteral("folders.sqlite"));
+    QVERIFY(database.open(databasePath));
+    listenfree::infrastructure::database::TrackRepository tracks(database);
+    listenfree::infrastructure::database::LibraryFolderRepository folders(database);
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
+    listenfree::qmlbridge::LibraryController controller(scanner, tracks, &folders, databasePath);
+
+    QVERIFY(controller.roots().isEmpty());
+    QVERIFY(controller.addRoot(root));
+    QCOMPARE(controller.roots(), QStringList({root}));
+    QVERIFY(!controller.addRoot(QStringLiteral("C:/definitely-missing-listenfree-folder")));
+    const QString nested = QDir(root).filePath(QStringLiteral("nested"));
+    QVERIFY(QDir(nested).mkpath(QStringLiteral(".")));
+    QVERIFY(!controller.addRoot(nested));
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    controller.scan({otherRoot});
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(controller.importedCount(), quint64(1));
+    QCOMPARE(tracks.search("").size(), std::size_t(2));
+    QCOMPARE(controller.totalCount(), quint64(2));
+
+    QVERIFY(controller.removeRoot(root));
+    QVERIFY(controller.roots().isEmpty());
+    QCOMPARE(controller.totalCount(), quint64(1));
+    QCOMPARE(tracks.search("unrelated-track").size(), std::size_t(1));
+    QCOMPARE(tracks.search("folder-track").size(), std::size_t(0));
+    QVERIFY(!controller.removeRoot(root));
+
+    const QString missingRoot = QDir(root).filePath(QStringLiteral("missing"));
+    QVERIFY(folders.add(std::filesystem::path(missingRoot.toStdWString())));
+    QVERIFY(controller.removeRoot(missingRoot));
+}
+
+void BackendTests::libraryAutoWatchFindsSettledFilesAndHonorsSwitch() {
+    QTemporaryDir directory;
+    const QString root = directory.filePath("music");
+    QVERIFY(QDir().mkpath(root));
+    const auto write = [](const QString& path) {
+        QFile file(path); return file.open(QIODevice::WriteOnly) && file.write("fixture") == 7;
+    };
+    QVERIFY(write(root + "/first.mp3"));
+    listenfree::infrastructure::database::Database database;
+    const auto databasePath = directory.filePath("watch.sqlite");
+    QVERIFY(database.open(databasePath));
+    listenfree::infrastructure::database::TrackRepository tracks(database);
+    listenfree::infrastructure::database::LibraryFolderRepository folders(database);
+    listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(
+        std::make_unique<listenfree::infrastructure::library::BasicMetadataReader>());
+    listenfree::qmlbridge::LibraryController controller(scanner, tracks, &folders, databasePath);
+    QVERIFY(controller.addRoot(root));
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
+    QCOMPARE(controller.totalCount(), 1);
+    QVERIFY(write(root + "/while-off.mp3"));
+    QTest::qWait(2700);
+    QCOMPARE(controller.totalCount(), 1);
+    controller.setAutoWatchEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(), 2, 7000);
+
+    const auto nested = root + "/new/album";
+    QVERIFY(QDir().mkpath(nested));
+    QVERIFY(write(nested + "/nested.flac"));
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(), 3, 7000);
+    QFile slow(nested + "/slow.mp3");
+    QVERIFY(slow.open(QIODevice::WriteOnly));
+    for (int i = 0; i < 5; ++i) {
+        QCOMPARE(slow.write(QByteArray(16384, 'a')), 16384);
+        QVERIFY(slow.flush());
+        QTest::qWait(650);
+        QCOMPARE(controller.totalCount(), 3);
+    }
+    slow.close();
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(), 4, 7000);
+    QVERIFY(write(nested + "/download.mp3.part"));
+    QTest::qWait(2700);
+    QCOMPARE(controller.totalCount(), 4);
+    QVERIFY(QFile::rename(nested + "/download.mp3.part", nested + "/download.mp3"));
+    controller.notifyFileCompleted(nested + "/download.mp3");
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(), 5, 7000);
+    controller.notifyFileCompleted(nested + "/download.mp3");
+    QTest::qWait(2700);
+    QCOMPARE(controller.totalCount(), 5);
+
+    controller.setAutoWatchEnabled(false);
+    QVERIFY(write(nested + "/disabled.mp3"));
+    QTest::qWait(2700);
+    QCOMPARE(controller.totalCount(), 5);
+    controller.setAutoWatchEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(), 6, 7000);
+    QVERIFY(write(nested + "/removed.mp3"));
+    QVERIFY(controller.removeRoot(root));
+    QTest::qWait(3000);
+    QCOMPARE(controller.totalCount(), 0);
+    QVERIFY(controller.lastError().isEmpty());
+}
+
+void BackendTests::libraryAutoWatchWaitsForManualScan() {
+    using namespace listenfree;
+    struct DeferredScanner final : application::ILocalLibraryScanner {
+        application::ScanCallbacks callbacks;
+        application::ScanRequest last;
+        int starts=0, cancels=0;
+        application::ScanId start(const application::ScanRequest& request, application::ScanCallbacks next) override {
+            last=request;callbacks=std::move(next);return ++starts;
+        }
+        void cancel(application::ScanId) noexcept override { ++cancels; }
+    } scanner;
+    QTemporaryDir directory;
+    const auto root=directory.filePath("music");QVERIFY(QDir().mkpath(root+"/album"));
+    infrastructure::database::Database db;const auto path=directory.filePath("busy.sqlite");
+    QVERIFY(db.open(path));
+    infrastructure::database::TrackRepository tracks(db);
+    infrastructure::database::LibraryFolderRepository folders(db);
+    QVERIFY(folders.add(std::filesystem::path(root.toStdWString())));
+    qmlbridge::LibraryController controller(scanner,tracks,&folders,path);
+    controller.setAutoWatchEnabled(true);controller.cancel();controller.scanDefault();
+    QTest::qWait(3200);
+    QCOMPARE(scanner.starts,1);QCOMPARE(scanner.cancels,0);QVERIFY(controller.scanning());
+    QFile added(root+"/album/new.mp3");QVERIFY(added.open(QIODevice::WriteOnly));added.write("fixture");added.close();
+    QTest::qWait(3200);QCOMPARE(scanner.starts,1);QCOMPARE(scanner.cancels,0);
+    scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
+    QTRY_COMPARE_WITH_TIMEOUT(scanner.starts,2,1500);
+    QVERIFY(!scanner.last.recursive);QCOMPARE(scanner.cancels,0);
+    controller.setAutoWatchEnabled(false);
+    QCOMPARE(scanner.cancels,1);QVERIFY(!controller.scanning());
+    controller.scanDefault();controller.setAutoWatchEnabled(true);controller.setAutoWatchEnabled(false);
+    QCOMPARE(scanner.cancels,1);QVERIFY(controller.scanning());
+    scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
+}
+
+void BackendTests::settingsControllerPersistsValues() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    listenfree::infrastructure::database::Database database;
+    QVERIFY(database.open(directory.filePath(QStringLiteral("settings.sqlite"))));
+    listenfree::infrastructure::database::SettingsRepository repository(database);
+    listenfree::qmlbridge::SettingsController controller(repository);
+
+    QCOMPARE(controller.value(QStringLiteral("ui.language"), QStringLiteral("zh-CN")).toString(),
+             QStringLiteral("zh-CN"));
+    controller.setValue(QStringLiteral("ui.language"), QStringLiteral("en-US"));
+    QCOMPARE(controller.value(QStringLiteral("ui.language")).toString(), QStringLiteral("en-US"));
+
+    listenfree::qmlbridge::SettingsController restored(repository);
+    QCOMPARE(restored.value(QStringLiteral("ui.language")).toString(), QStringLiteral("en-US"));
+    controller.setValue(QStringLiteral("ui.motionEnabled"), false);
+    const auto flag = restored.value(QStringLiteral("ui.motionEnabled"), true);
+    QCOMPARE(flag.metaType(), QMetaType::fromType<bool>());
+    QVERIFY(!flag.toBool());
+    controller.setValue(QStringLiteral("lyrics.textSize"), 36);
+    QCOMPARE(restored.value(QStringLiteral("lyrics.textSize"), 28).toInt(), 36);
+}
+
 void BackendTests::libraryControllerContainsFingerprintFailure() {
     listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner;
     ThrowingFingerprintRepository repository;
-    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+    listenfree::qmlbridge::LibraryController controller(scanner, repository, nullptr, QString{});
 
     controller.scan({QStringLiteral("C:/library")});
 
@@ -698,10 +925,12 @@ void BackendTests::libraryControllerSkipsUnchangedSizeAndMtime() {
     listenfree::infrastructure::database::Database database;
     QVERIFY(database.open(directory.filePath(QStringLiteral("incremental.sqlite"))));
     listenfree::infrastructure::database::TrackRepository repository(database);
+    listenfree::infrastructure::database::LibraryFolderRepository folders(database);
     auto reader = std::make_unique<CountingMetadataReader>();
     auto* readerProbe = reader.get();
     listenfree::infrastructure::library::LocalLibraryScannerAdapter scanner(std::move(reader));
-    listenfree::qmlbridge::LibraryController controller(scanner, repository);
+    listenfree::qmlbridge::LibraryController controller(scanner, repository, &folders,
+                                                         directory.filePath(QStringLiteral("incremental.sqlite")));
 
     controller.scan({directory.path()});
     QTRY_VERIFY_WITH_TIMEOUT(!controller.scanning(), 3000);
@@ -1021,15 +1250,46 @@ void BackendTests::sourceHostProvidesAsyncRequestBridge() {
     QTcpServer server;
     QVERIFY(server.listen(QHostAddress::LocalHost));
     bool hangingRequest = false;
-    connect(&server, &QTcpServer::newConnection, &server, [&server, &hangingRequest] {
+    bool formRequestValid = false;
+    bool multipartRequestValid = false;
+    bool proxyRequestObserved = false;
+    connect(&server, &QTcpServer::newConnection, &server,
+            [&server, &hangingRequest, &formRequestValid, &multipartRequestValid,
+             &proxyRequestObserved] {
         while (server.hasPendingConnections()) {
             QTcpSocket* socket = server.nextPendingConnection();
-            connect(socket, &QTcpSocket::readyRead, socket, [socket, &hangingRequest] {
-                const QByteArray request = socket->readAll();
-                if (!request.contains("\r\n\r\n")) return;
+            connect(socket, &QTcpSocket::readyRead, socket,
+                    [socket, &hangingRequest, &formRequestValid, &multipartRequestValid,
+                     &proxyRequestObserved] {
+                QByteArray request = socket->property("requestData").toByteArray();
+                request += socket->readAll();
+                socket->setProperty("requestData", request);
+                const auto headerEnd = request.indexOf("\r\n\r\n");
+                if (headerEnd < 0) return;
+                if (request.left(headerEnd).contains("http://music.invalid")) {
+                    proxyRequestObserved = true;
+                }
+                const auto headers = request.left(headerEnd).toLower();
+                const QRegularExpression lengthExpression(QStringLiteral("content-length:\\s*(\\d+)"),
+                                                           QRegularExpression::CaseInsensitiveOption);
+                const auto lengthMatch = lengthExpression.match(QString::fromLatin1(headers));
+                const auto contentLength = lengthMatch.hasMatch() ? lengthMatch.captured(1).toInt() : 0;
+                if (request.size() < headerEnd + 4 + contentLength) return;
                 if (request.contains("/hang")) {
                     hangingRequest = true;
                     return;
+                }
+                const auto bodyBytes = request.mid(headerEnd + 4, contentLength);
+                if (request.contains("/form HTTP/1.1")) {
+                    formRequestValid = headers.contains("content-type: application/x-www-form-urlencoded") &&
+                                       bodyBytes.contains("alpha=one%20two") &&
+                                       bodyBytes.contains("beta=%E4%B8%89");
+                } else if (request.contains("/multipart HTTP/1.1")) {
+                    multipartRequestValid = headers.contains("content-type: multipart/form-data; boundary=") &&
+                                            bodyBytes.contains("name=\"field\"") &&
+                                            bodyBytes.contains("value") &&
+                                            bodyBytes.contains("name=\"binary\"") &&
+                                            bodyBytes.contains("raw-bytes");
                 }
                 const QByteArray body = R"({"url":"https://media.invalid/from-request.mp3"})";
                 const QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
@@ -1041,7 +1301,8 @@ void BackendTests::sourceHostProvidesAsyncRequestBridge() {
     });
 
     const QString script = QStringLiteral(R"JS(
-lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
+const { EVENT_NAMES, request, on, send } = globalThis.lx
+on(EVENT_NAMES.request, ({ source, action, info }) => {
     if (action !== 'musicUrl') return Promise.reject(new Error('unsupported action'))
     const input = lx.utils.buffer.from('contract')
     if (lx.utils.crypto.md5('contract') !== '800c327aefb3f9241513cbf551abbfda') {
@@ -1049,23 +1310,40 @@ lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
     }
     const encrypted = lx.utils.crypto.aesEncrypt(input, 'aes-128-cbc', lx.utils.crypto.randomBytes(16), lx.utils.crypto.randomBytes(16))
     if (!encrypted || encrypted.length !== 16) return Promise.reject(new Error('aes bridge failed'))
+    const rsaKey = '-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7clFSs6sXqHauqKWqdtLkF2KexO40H1YTX8z2lSgBBOAxLsvaklV8k4cBFK9snQXE9/DDaFt6Rr7iVZMldczhC0JNgTz+SHXT6CBHuX3e9SdB1Ua44oncaTWz7OBGLbCiK45wIDAQAB\n-----END PUBLIC KEY-----'
+    const rsa = lx.utils.crypto.rsaEncrypt(lx.utils.buffer.from('1234567890abcdef'), rsaKey)
+    if (rsa.toString('hex') !== '19cf95d2fd1442f7e8a134c41f3b495df622afba2bcab8aed511021d534cce4ca4367e5b8117759e2591c5117ef24fa8072addeb8179e5dcb2cbc4726f0ff5baceded8ac8b392a6587e9e7d17c68d3dca124effd36fed187f6a50ba2fc81ebfbaa53cd6dc389ce036ef3c76350e521576a9dc9c727b1163402d1d8d02edb49e8') {
+        return Promise.reject(new Error('rsa bridge failed'))
+    }
     return lx.utils.zlib.deflate(input).then(compressed => lx.utils.zlib.inflate(compressed)).then(roundtrip => {
         if (lx.utils.buffer.bufToString(roundtrip) !== 'contract') throw new Error('zlib bridge failed')
         return new Promise((resolve, reject) => {
-            const endpoint = info.musicInfo.id === 'cancel' ? '/hang' : ''
-            lx.request('http://127.0.0.1:%1' + endpoint, { method: 'get', timeout: 2000 }, (error, response, body) => {
+            let endpoint = ''
+            let options = { method: 'get', timeout: 2000 }
+            if (info.musicInfo.id === 'cancel') endpoint = '/hang'
+            if (info.musicInfo.id === 'form') {
+                endpoint = '/form'
+                options = { method: 'post', form: { alpha: 'one two', beta: '三' }, timeout: 2000 }
+            }
+            if (info.musicInfo.id === 'multipart') {
+                endpoint = '/multipart'
+                options = { method: 'post', formData: { field: 'value', binary: Buffer.from('raw-bytes') }, timeout: 2000 }
+            }
+            request('http://music.invalid' + endpoint, options, (error, response, body) => {
                 if (error) return reject(error)
-                if (!response || !body || body.url === undefined) return reject(new Error('bad response'))
+                if (!response || !body?.url || response.body !== body || !Buffer.isBuffer(response.raw)) return reject(new Error('bad response'))
+                console.log('request complete')
                 resolve(body.url)
             })
         })
     })
 })
-lx.send(lx.EVENT_NAMES.inited, {
+send(EVENT_NAMES.updateAlert, { log: 'compat update', updateUrl: 'https://example.invalid/update' })
+send(EVENT_NAMES.inited, {
     status: true,
     sources: { kw: { type: 'music', actions: ['musicUrl'], qualitys: ['320k'] } }
 })
-)JS").arg(server.serverPort());
+)JS");
     QFile plugin(temp.filePath(QStringLiteral("request-source.js")));
     QVERIFY(plugin.open(QIODevice::WriteOnly | QIODevice::Text));
     const QByteArray scriptBytes = script.toUtf8();
@@ -1084,10 +1362,15 @@ lx.send(lx.EVENT_NAMES.inited, {
     load.type = listenfree::sourcehost::MessageType::LoadPlugin;
     load.requestId = QStringLiteral("request-load");
     load.payload.insert(QStringLiteral("path"), plugin.fileName());
+    load.payload.insert(QStringLiteral("proxy"),
+                        QJsonObject{{QStringLiteral("host"), QStringLiteral("127.0.0.1")},
+                                    {QStringLiteral("port"), server.serverPort()}});
     QVERIFY(client.request(load, 2000));
     QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1000);
     QCOMPARE(finishedSpy.takeFirst().at(1).value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
              listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    QCOMPARE(lastMessage.payload.value(QStringLiteral("updateAlert")).toObject()
+                 .value(QStringLiteral("log")).toString(), QStringLiteral("compat update"));
 
     listenfree::sourcehost::SourceMessage resolve;
     resolve.type = listenfree::sourcehost::MessageType::ResolveMusicUrl;
@@ -1101,6 +1384,21 @@ lx.send(lx.EVENT_NAMES.inited, {
              listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
     QCOMPARE(lastMessage.payload.value(QStringLiteral("data")).toObject().value(QStringLiteral("url")).toString(),
              QStringLiteral("https://media.invalid/from-request.mp3"));
+
+    for (const auto& id : {QStringLiteral("form"), QStringLiteral("multipart")}) {
+        listenfree::sourcehost::SourceMessage bridgeRequest = resolve;
+        bridgeRequest.requestId = QStringLiteral("request-") + id;
+        bridgeRequest.payload.insert(QStringLiteral("musicInfo"),
+                                     QJsonObject{{QStringLiteral("id"), id}});
+        QVERIFY(client.request(bridgeRequest, 3000));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 2500);
+        QCOMPARE(finishedSpy.takeFirst().at(1)
+                     .value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
+                 listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
+    }
+    QVERIFY(formRequestValid);
+    QVERIFY(multipartRequestValid);
+    QVERIFY(proxyRequestObserved);
 
     listenfree::sourcehost::SourceMessage cancelResolve = resolve;
     cancelResolve.requestId = QStringLiteral("request-cancel");
@@ -1276,6 +1574,7 @@ void BackendTests::mockProvider() {
 
 void BackendTests::listModels() {
     listenfree::qmlbridge::TrackListModel model;
+    QSignalSpy countChanged(&model, &listenfree::qmlbridge::TrackListModel::countChanged);
     listenfree::domain::Track track;
     track.id = listenfree::domain::TrackId("model-track");
     track.title = "Model Track";
@@ -1283,6 +1582,15 @@ void BackendTests::listModels() {
     QCOMPARE(model.rowCount(), 1);
     QCOMPARE(model.data(model.index(0, 0), listenfree::qmlbridge::TrackListModel::TitleRole).toString(),
              QStringLiteral("Model Track"));
+    QCOMPARE(model.property("count").toInt(), 1);
+    QCOMPARE(countChanged.count(), 1);
+    QCOMPARE(model.get(0).value("title").toString(), QStringLiteral("Model Track"));
+    QVERIFY(model.get(-1).isEmpty());
+    QVERIFY(model.get(1).isEmpty());
+    model.setTracks({});
+    QCOMPARE(model.property("count").toInt(), 0);
+    QCOMPARE(countChanged.count(), 2);
+    QVERIFY(model.get(0).isEmpty());
 }
 
 void BackendTests::appControllerMock() {

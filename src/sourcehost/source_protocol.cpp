@@ -24,6 +24,7 @@ QString SourceProtocol::typeName(MessageType type) {
     case MessageType::Result: return QStringLiteral("result");
     case MessageType::Error: return QStringLiteral("error");
     case MessageType::Log: return QStringLiteral("log");
+    case MessageType::UpdateAlert: return QStringLiteral("updateAlert");
     case MessageType::Shutdown: return QStringLiteral("shutdown");
     }
     return QStringLiteral("error");
@@ -35,7 +36,7 @@ bool SourceProtocol::typeFromName(const QString& name, MessageType& type) {
         MessageType::Initialize, MessageType::ResolveMusicUrl, MessageType::ResolveLyric, MessageType::ResolvePic,
         MessageType::Search, MessageType::GetPlaylist,
         MessageType::GetChart, MessageType::Cancel, MessageType::Result, MessageType::Error, MessageType::Log,
-        MessageType::Shutdown};
+        MessageType::UpdateAlert, MessageType::Shutdown};
     for (const auto candidate : types) {
         if (typeName(candidate) == name) {
             type = candidate;
@@ -84,11 +85,15 @@ bool SourceProtocol::decode(const QByteArray& frame, SourceMessage& message, QSt
     }
     const double protocolVersion = object.value(QStringLiteral("protocolVersion")).toDouble();
     if (protocolVersion != 1.0) return fail(QStringLiteral("unsupported-protocol-version"));
+    const QString requestId = object.value(QStringLiteral("requestId")).toString();
+    if (requestId.toUtf8().size() > SourceProtocol::MaxRequestIdBytes) {
+        return fail(QStringLiteral("request-id-too-large"));
+    }
     MessageType type;
     if (!typeFromName(object.value(QStringLiteral("messageType")).toString(), type)) return fail(QStringLiteral("unknown-message-type"));
     message.protocolVersion = 1;
     message.type = type;
-    message.requestId = object.value(QStringLiteral("requestId")).toString();
+    message.requestId = requestId;
     message.payload = object.value(QStringLiteral("payload")).toObject();
     return true;
 }

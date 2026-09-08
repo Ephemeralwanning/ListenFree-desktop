@@ -41,6 +41,18 @@ private:
     Database& database_;
 };
 
+class LibraryFolderRepository final : public application::ILibraryFolderRepository {
+public:
+    explicit LibraryFolderRepository(Database& database) noexcept : database_(database) {}
+
+    std::vector<application::LibraryFolder> roots() override;
+    bool add(const std::filesystem::path& path) override;
+    bool remove(std::int64_t id, const std::filesystem::path& path) override;
+
+private:
+    Database& database_;
+};
+
 class PlayHistoryRepository final : public application::IPlayHistoryRepository {
 public:
     explicit PlayHistoryRepository(Database& database) noexcept : database_(database) {}

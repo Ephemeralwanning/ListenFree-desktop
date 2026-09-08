@@ -9,14 +9,26 @@ namespace listenfree::qmlbridge {
 
 class TrackListModel : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
 public:
-    enum Role { TrackIdRole = Qt::UserRole + 1, TitleRole, ArtistRole, DurationRole };
+    enum Role {
+        TrackIdRole = Qt::UserRole + 1,
+        TitleRole,
+        ArtistRole,
+        AlbumRole,
+        DurationRole,
+        LocalPathRole,
+        ArtworkRole
+    };
     explicit TrackListModel(QObject* parent = nullptr);
     void setTracks(std::vector<domain::Track> tracks);
     [[nodiscard]] const std::vector<domain::Track>& tracks() const noexcept { return tracks_; }
     int rowCount(const QModelIndex& parent = {}) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
+    Q_INVOKABLE QVariantMap get(int row) const;
+signals:
+    void countChanged();
 private:
     std::vector<domain::Track> tracks_;
 };

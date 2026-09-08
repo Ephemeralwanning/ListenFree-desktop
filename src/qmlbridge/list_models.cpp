@@ -1,6 +1,9 @@
 #include "qmlbridge/list_models.h"
 
 #include <QString>
+#include <QUrl>
+#include <QFileInfo>
+#include <QDateTime>
 
 namespace listenfree::qmlbridge {
 
@@ -10,6 +13,15 @@ void TrackListModel::setTracks(std::vector<domain::Track> tracks) {
     beginResetModel();
     tracks_ = std::move(tracks);
     endResetModel();
+    emit countChanged();
+}
+
+QVariantMap TrackListModel::get(int row) const {
+    if (row < 0 || row >= rowCount()) return {};
+    QVariantMap result;
+    const auto roles=roleNames();
+    for(auto it=roles.cbegin();it!=roles.cend();++it)result.insert(QString::fromUtf8(it.value()),data(index(row,0),it.key()));
+    return result;
 }
 
 int TrackListModel::rowCount(const QModelIndex& parent) const {
@@ -24,13 +36,24 @@ QVariant TrackListModel::data(const QModelIndex& index, int role) const {
     case TitleRole: return QString::fromStdString(track.title);
     case TrackIdRole: return QString::fromStdString(track.id.value());
     case ArtistRole: return track.artists.empty() ? QString{} : QString::fromStdString(track.artists.front().name);
+    case AlbumRole: return track.album ? QString::fromStdString(track.album->title) : QString{};
     case DurationRole: return static_cast<qint64>(track.duration.count());
+    case LocalPathRole: return track.localPath ? QString::fromStdString(*track.localPath) : QString{};
+    case ArtworkRole:
+        if (track.localPath) {
+            const auto path=QString::fromStdString(*track.localPath);const QFileInfo info(path);
+            return "image://covers/" + QString::fromLatin1(QUrl::toPercentEncoding(path)) + "?v="
+                + QString::number(info.lastModified().toMSecsSinceEpoch()) + "-" + QString::number(info.size());
+        }
+        return track.album && track.album->artworkUrl ? QString::fromStdString(*track.album->artworkUrl) : QString{};
     default: return {};
     }
 }
 
 QHash<int, QByteArray> TrackListModel::roleNames() const {
-    return {{TrackIdRole, "trackId"}, {TitleRole, "title"}, {ArtistRole, "artist"}, {DurationRole, "duration"}};
+    return {{TrackIdRole, "trackId"}, {TitleRole, "title"}, {ArtistRole, "artist"},
+            {AlbumRole, "album"}, {DurationRole, "duration"}, {LocalPathRole, "localPath"},
+            {ArtworkRole, "artwork"}};
 }
 
 void QueueModel::setCurrentIndex(int index) {

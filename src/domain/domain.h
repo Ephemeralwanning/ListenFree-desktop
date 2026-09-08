@@ -134,6 +134,17 @@ public:
         ++currentIndex_;
         return true;
     }
+    bool move(std::size_t from, std::size_t to) {
+        if (from >= items_.size() || to >= items_.size()) return false;
+        if (from == to) return true;
+        auto item = std::move(items_[from]);
+        items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(from));
+        items_.insert(items_.begin() + static_cast<std::ptrdiff_t>(to), std::move(item));
+        if (currentIndex_ == from) currentIndex_ = to;
+        else if (from < currentIndex_ && to >= currentIndex_) --currentIndex_;
+        else if (from > currentIndex_ && to <= currentIndex_) ++currentIndex_;
+        return true;
+    }
     void clear() noexcept { items_.clear(); currentIndex_ = 0; }
 private:
     std::vector<PlaybackItem> items_;

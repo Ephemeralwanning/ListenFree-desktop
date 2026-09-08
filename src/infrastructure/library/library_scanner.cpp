@@ -1,6 +1,8 @@
 #include "infrastructure/library/library_scanner.h"
 
 #include <QDirIterator>
+#include <QCryptographicHash>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QPromise>
@@ -16,13 +18,23 @@
 
 namespace listenfree::infrastructure::library {
 
+QStringList musicFileFilters() {
+    return{QStringLiteral("*.mp3"), QStringLiteral("*.flac"), QStringLiteral("*.wav"),
+                                  QStringLiteral("*.aac"), QStringLiteral("*.m4a"), QStringLiteral("*.ogg"),
+                                  QStringLiteral("*.oga"), QStringLiteral("*.opus"), QStringLiteral("*.wma"),
+                                  QStringLiteral("*.ape"), QStringLiteral("*.wv"), QStringLiteral("*.aiff"),
+                                  QStringLiteral("*.aif"), QStringLiteral("*.tta"), QStringLiteral("*.mp4")};
+}
+
 namespace {
 constexpr qsizetype scanBatchSize = 64;
-constexpr int pendingBatchLimit = 2;
 }
 
 LibraryScanner::LibraryScanner(QObject* parent) : QObject(parent) {
-    watcher_.setPendingResultsLimit(pendingBatchLimit);
+    // No pending-results backpressure here: an addResult limit made the worker
+    // block on GUI consumption, which could deadlock against start()'s
+    // waitForFinished(). Consumers now only forward batches, so the result
+    // queue stays bounded by the scan size.
     connect(&watcher_, &QFutureWatcher<ScanBatchPtr>::resultReadyAt, this, [this](int index) {
         const auto batch = watcher_.resultAt(index);
         if (!batch || batch->generation != generation_) return;
@@ -53,7 +65,7 @@ void LibraryScanner::start(const QStringList& roots,
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     const auto token = cancelled_;
     const auto generation = generation_;
-    QHash<QString, QPair<quint64, qint64>> known;
+    QHash<QString, application::LocalFileFingerprint> known;
     known.reserve(static_cast<qsizetype>(knownFiles.size()));
     for (const auto& file : knownFiles) {
         const QString canonical = QDir::cleanPath(QString::fromStdWString(file.canonicalPath.wstring()));
@@ -62,7 +74,7 @@ void LibraryScanner::start(const QStringList& roots,
 #else
         const QString key = canonical;
 #endif
-        known.insert(key, {static_cast<quint64>(file.sizeBytes), file.modifiedMs});
+        known.insert(key, file);
     }
     watcher_.setFuture(QtConcurrent::run([roots, recursive, token, generation, known = std::move(known),
                                           reader = std::move(metadataReader)](
@@ -75,11 +87,7 @@ void LibraryScanner::start(const QStringList& roots,
             return;
         }
 
-        const QStringList filters{QStringLiteral("*.mp3"), QStringLiteral("*.flac"), QStringLiteral("*.wav"),
-                                  QStringLiteral("*.aac"), QStringLiteral("*.m4a"), QStringLiteral("*.ogg"),
-                                  QStringLiteral("*.oga"), QStringLiteral("*.opus"), QStringLiteral("*.wma"),
-                                  QStringLiteral("*.ape"), QStringLiteral("*.wv"), QStringLiteral("*.aiff"),
-                                  QStringLiteral("*.aif"), QStringLiteral("*.tta"), QStringLiteral("*.mp4")};
+        const auto filters = musicFileFilters();
 
         auto batch = std::make_shared<ScanBatch>();
         batch->generation = generation;
@@ -115,12 +123,28 @@ void LibraryScanner::start(const QStringList& roots,
                     seen.insert(key);
                     const auto knownFile = known.constFind(key);
                     if (knownFile != known.cend() &&
-                        knownFile->first == static_cast<quint64>(file.size()) &&
-                        knownFile->second == file.lastModified().toMSecsSinceEpoch()) {
-                        continue;
+                        knownFile->sizeBytes == static_cast<quint64>(file.size()) &&
+                        knownFile->modifiedMs == file.lastModified().toMSecsSinceEpoch()) {
+                        if(knownFile->duplicateHash.empty()) continue;
+                        const auto digest=[&](const QString& path) {
+                            QFile input(path); QCryptographicHash hash(QCryptographicHash::Sha256);
+                            if(!input.open(QIODevice::ReadOnly))return QByteArray{};
+                            while(!input.atEnd()) {
+                                if(token->load())return QByteArray{};
+                                const auto bytes=input.read(1024*1024);if(bytes.isEmpty()&&input.error()!=QFile::NoError)return QByteArray{};
+                                hash.addData(bytes);
+                            }
+                            return hash.result().toHex();
+                        };
+                        const auto expected=QByteArray::fromStdString(knownFile->duplicateHash);
+                        if(digest(canonical)==expected && digest(QString::fromStdWString(knownFile->keeperPath.wstring()))==expected)continue;
                     }
                     const auto path = std::filesystem::path(canonical.toStdWString());
-                    if (auto track = reader->read(path)) batch->tracks.push_back(std::move(*track));
+                    if (auto track = reader->read(path)) {
+                        const QFileInfo after(canonical);
+                        if (after.exists() && after.size() == file.size() && after.lastModified() == file.lastModified())
+                            batch->tracks.push_back(std::move(*track));
+                    }
                     if (batch->tracks.size() >= scanBatchSize && !flush()) return;
                 }
             }

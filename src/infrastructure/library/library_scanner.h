@@ -12,6 +12,8 @@
 
 namespace listenfree::infrastructure::library {
 
+QStringList musicFileFilters();
+
 struct ScanBatch {
     QVector<domain::Track> tracks;
     QString error;

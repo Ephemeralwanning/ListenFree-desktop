@@ -61,6 +61,31 @@ bool PlaybackService::select(std::size_t index, bool playImmediately) {
     return true;
 }
 
+bool PlaybackService::remove(std::size_t index) {
+    if (index >= queue_.items().size()) return false;
+    const bool removedCurrent = index == queue_.currentIndex();
+    const bool resumePlayback = player_.state() == domain::PlaybackState::Playing;
+    if (!queue_.remove(index)) return false;
+    if (events_.onQueueChanged) events_.onQueueChanged();
+    if (!removedCurrent) return true;
+
+    clearLyrics();
+    if (events_.onCurrentItemChanged) events_.onCurrentItemChanged();
+    if (queue_.empty()) {
+        player_.clear();
+        return true;
+    }
+    if (resumePlayback) return playCurrent();
+    player_.clear();
+    return true;
+}
+
+bool PlaybackService::move(std::size_t from, std::size_t to) {
+    if (!queue_.move(from, to)) return false;
+    if (events_.onQueueChanged) events_.onQueueChanged();
+    return true;
+}
+
 bool PlaybackService::playCurrent() {
     const auto* item = currentItem();
     if (item == nullptr) {

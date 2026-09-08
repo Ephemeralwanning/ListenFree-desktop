@@ -3,56 +3,20 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
   "configurePresets": [
     {
-      "name": "windows-debug",
-      "displayName": "Windows Debug",
+      "name": "portable",
+      "displayName": "ListenFree Portable Release",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/windows-debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_PREFIX_PATH": "$env{LISTENFREE_QT_ROOT}",
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "${sourceDir}/.vcpkg_installed",
-        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
-        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic",
-        "LISTENFREE_BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "windows-release",
-      "displayName": "Windows Release",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/windows-release",
+      "binaryDir": "${sourceDir}/build/portable",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_PREFIX_PATH": "$env{LISTENFREE_QT_ROOT}",
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "${sourceDir}/.vcpkg_installed",
-        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
-        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic",
-        "LISTENFREE_BUILD_TESTS": "ON"
+        "CMAKE_PREFIX_PATH": "F:/QT/6.11.2/mingw_64;${sourceDir}/.vcpkg_installed/x64-mingw-dynamic",
+        "CMAKE_CXX_COMPILER": "F:/QT/Tools/mingw1310_64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "F:/QT/Tools/Ninja/ninja.exe",
+        "LISTENFREE_BUILD_TESTS": "ON",
+        "LISTENFREE_BUILD_QMMP_BACKEND": "ON",
+        "LISTENFREE_BUILD_MPV_BACKEND": "OFF"
       }
     }
   ],
-  "buildPresets": [
-    {
-      "name": "windows-debug",
-      "configurePreset": "windows-debug"
-    },
-    {
-      "name": "windows-release",
-      "configurePreset": "windows-release"
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "test-debug",
-      "configurePreset": "windows-debug",
-      "output": { "outputOnFailure": true }
-    },
-    {
-      "name": "test-release",
-      "configurePreset": "windows-release",
-      "output": { "outputOnFailure": true }
-    }
-  ]
+  "buildPresets": [{ "name": "portable", "configurePreset": "portable", "jobs": 4 }]
 }

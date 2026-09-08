@@ -1,0 +1,79 @@
+#pragma once
+#include <QQuickImageProvider>
+#include <QUrl>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QBuffer>
+#include <QImageReader>
+#include <qmmp/metadatamanager.h>
+#include <taglib/fileref.h>
+#include <taglib/flacfile.h>
+#include <taglib/flacpicture.h>
+#include <taglib/mpegfile.h>
+#include <taglib/id3v2tag.h>
+#include <taglib/attachedpictureframe.h>
+#include <taglib/tvariant.h>
+
+// TagLib handles embedded MP3/FLAC pictures; Qmmp locates adjacent covers.
+// Qt Quick owns the asynchronous request thread and caches size variants.
+class CoverImageProvider final : public QQuickImageProvider {
+    static QImage readScaled(QImageReader& reader, const QSize& bounds) {
+        const auto original = reader.size();
+        if (original.isValid()) reader.setScaledSize(original.scaled(bounds, Qt::KeepAspectRatio));
+        return reader.read();
+    }
+    static QImage loadArtwork(const QString& id, const QSize& bounds) {
+        const auto path = QUrl::fromPercentEncoding(id.section('?', 0, 0).toUtf8());
+#ifdef Q_OS_WIN
+        const auto fileName = path.toStdWString();
+#else
+        const auto fileName = path.toStdString();
+#endif
+        TagLib::FileRef file(fileName.c_str(), false);
+        QImage image;
+        if (!file.isNull()) {
+            const auto pictures = file.complexProperties("PICTURE");
+            for (const bool front : {true, false}) for (const auto& picture : pictures) {
+                if ((picture["pictureType"].toString() == "Front Cover") != front) continue;
+                const auto bytes = picture["data"].toByteVector();
+                QBuffer buffer;
+                buffer.setData(QByteArray::fromRawData(bytes.data(), bytes.size()));
+                buffer.open(QIODevice::ReadOnly);
+                QImageReader reader(&buffer);
+                image = readScaled(reader, bounds);
+                if (!image.isNull()) return image;
+            }
+        }
+        const auto adjacent = MetaDataManager::instance()->findCoverFile(path);
+        if (!adjacent.isEmpty()) {
+            QImageReader reader(adjacent);
+            image = readScaled(reader, bounds);
+        }
+        return image;
+    }
+public:
+    CoverImageProvider() : QQuickImageProvider(QQuickImageProvider::Image, QQmlImageProviderBase::ForceAsynchronousImageLoading) {}
+    QImage requestImage(const QString& id, QSize* size, const QSize& requested) override {
+        QImage image;
+        // Qt Quick may supply only one sourceSize axis (the other is zero).
+        // QSize::isValid accepts zero, but scaling into it discards the image.
+        const QSize bounds = requested.width() > 0 || requested.height() > 0
+            ? QSize(requested.width() > 0 ? qMin(requested.width(), 2400) : 2400,
+                    requested.height() > 0 ? qMin(requested.height(), 2400) : 2400)
+            : QSize(256, 256);
+        if (id.startsWith("collection/")) {
+            const auto encoded = id.section('?', 0, 0).mid(11).toLatin1();
+            const auto candidates = QJsonDocument::fromJson(QByteArray::fromBase64(encoded, QByteArray::Base64UrlEncoding)).array();
+            for (const auto& candidate : candidates) {
+                image = loadArtwork(candidate.toString(), bounds);
+                if (!image.isNull()) break;
+            }
+        } else image = loadArtwork(id, bounds);
+        // A transparent one-pixel sentinel lets CoverArt distinguish a missing
+        // cover from real artwork without emitting an image-loading error.
+        if (image.isNull()) { image = QImage(1, 1, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent); }
+        else image = image.scaled(bounds, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        if (size) *size = image.size();
+        return image;
+    }
+};

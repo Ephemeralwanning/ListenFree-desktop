@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QString>
+#include <QtGlobal>
 
 namespace listenfree::sourcehost {
 
@@ -22,6 +23,7 @@ enum class MessageType {
     Result,
     Error,
     Log,
+    UpdateAlert,
     Shutdown
 };
 
@@ -34,6 +36,9 @@ struct SourceMessage {
 
 class SourceProtocol final {
 public:
+    // Keep request identifiers bounded on both sides of the pipe so a
+    // diagnostic response can always fit in the framed protocol envelope.
+    static constexpr qsizetype MaxRequestIdBytes = 256 * 1024;
     static QByteArray encode(const SourceMessage& message);
     static bool decode(const QByteArray& frame, SourceMessage& message, QString* error = nullptr);
     static QString typeName(MessageType type);

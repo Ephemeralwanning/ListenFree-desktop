@@ -38,9 +38,12 @@ int main(int argc, char* argv[]) {
     // the capability claim executable before wiring a product backend.
     bool configured = true;
     configured &= setOption(context, "terminal", "no");
+    configured &= setOption(context, "config", "no");
     configured &= setOption(context, "video", "no");
     configured &= setOption(context, "ao", "wasapi");
     configured &= setOption(context, "audio-exclusive", "no");
+    configured &= setOption(context, "pause", "yes");
+    configured &= setOption(context, "idle", "yes");
     configured &= setOption(context, "af",
                             "lavfi=[equalizer=f=1000:t=q:w=1:g=3,bass=g=2,treble=g=2,aecho=0.8:0.9:1000:0.3]");
     if (!configured) {

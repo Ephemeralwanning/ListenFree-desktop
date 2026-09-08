@@ -36,6 +36,8 @@ public:
     [[nodiscard]] const domain::PlaybackQueue& queue() const noexcept { return queue_; }
     [[nodiscard]] const domain::PlaybackItem* currentItem() const noexcept;
     bool select(std::size_t index, bool playImmediately = false);
+    bool remove(std::size_t index);
+    bool move(std::size_t from, std::size_t to);
     bool playCurrent();
     bool next();
 

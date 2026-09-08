@@ -201,6 +201,7 @@ SourceHostClient::~SourceHostClient() {
     if (running()) {
         terminateProcessTree();
         process_->kill();
+        process_->waitForFinished(1000);
     }
     closeJobObject();
     if (running()) {

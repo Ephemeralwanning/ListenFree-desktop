@@ -76,6 +76,9 @@ private:
 } // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_WIN
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#endif
     QCoreApplication app(argc, argv);
     const QStringList arguments = app.arguments();
     if (arguments.size() == 3 && arguments.at(1) == QStringLiteral("--tree-child")) {

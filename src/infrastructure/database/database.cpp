@@ -2,16 +2,37 @@
 
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
 
+#include <algorithm>
 #include <array>
+#include <unordered_map>
 
 namespace listenfree::infrastructure::database {
 
 namespace {
+
+// Mirrors fooyin's per-connection pragma setup (src/utils/database/dbconnectionpool.cpp):
+// WAL keeps the GUI reader connection concurrent with the scan writer thread's
+// connection, and busy_timeout absorbs residual lock windows instead of failing
+// commits. Journal/synchronous changes are harmless no-ops on :memory:.
+void applyConnectionPragmas(QSqlDatabase& database) {
+    QSqlQuery foreignKeys(database);
+    foreignKeys.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+    QSqlQuery journal(database);
+    journal.exec(QStringLiteral("PRAGMA journal_mode = WAL"));
+    QSqlQuery synchronous(database);
+    synchronous.exec(QStringLiteral("PRAGMA synchronous = NORMAL"));
+    QSqlQuery busyTimeout(database);
+    busyTimeout.exec(QStringLiteral("PRAGMA busy_timeout = 5000"));
+}
 
 struct Migration {
     int version;
@@ -41,11 +62,35 @@ const std::array migrations{
               {QStringLiteral("CREATE TABLE IF NOT EXISTS track_albums (track_id TEXT PRIMARY KEY, album_id TEXT NOT NULL, FOREIGN KEY(track_id) REFERENCES tracks(track_id) ON DELETE CASCADE, FOREIGN KEY(album_id) REFERENCES albums(album_id) ON DELETE CASCADE)"),
                QStringLiteral("CREATE INDEX IF NOT EXISTS idx_track_albums_album ON track_albums(album_id)"),
                QStringLiteral("CREATE INDEX IF NOT EXISTS idx_local_files_track ON local_files(track_id)")}},
+    // Music library roots, mirroring Strawberry's directories table
+    // (collectionbackend.cpp AddDirectory): one row per root, path lookup
+    // deduplicates, rowid ordering preserves insertion order.
+    Migration{3,
+              {QStringLiteral("CREATE TABLE IF NOT EXISTS library_folders (folder_id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL UNIQUE COLLATE NOCASE, added_ms INTEGER NOT NULL DEFAULT 0)")}},
+    Migration{4, {QStringLiteral("CREATE TABLE IF NOT EXISTS duplicate_aliases (path TEXT PRIMARY KEY, keeper_id TEXT NOT NULL REFERENCES tracks(track_id) ON DELETE CASCADE, keeper_path TEXT NOT NULL, hash TEXT NOT NULL, size_bytes INTEGER NOT NULL, modified_ms INTEGER NOT NULL)")}},
 };
 
 void rollback(QSqlDatabase& database) {
     QSqlQuery query(database);
     query.exec(QStringLiteral("ROLLBACK"));
+}
+
+QString normalizedLibraryFolder(const QString& path) {
+    if (path.isEmpty()) return {};
+    const QFileInfo info(path);
+    if (info.exists()) {
+        if (!info.isDir()) return {};
+        return QDir(info.absoluteFilePath()).canonicalPath();
+    }
+    return QDir(QDir::cleanPath(info.absoluteFilePath())).absolutePath();
+}
+
+QString libraryPrefixPattern(const QString& path) {
+    QString escaped = path;
+    escaped.replace(QStringLiteral("\\"), QStringLiteral("\\\\"))
+        .replace(QStringLiteral("%"), QStringLiteral("\\%"))
+        .replace(QStringLiteral("_"), QStringLiteral("\\_"));
+    return escaped + QStringLiteral("/%");
 }
 
 void hydrateRelations(const QSqlDatabase& database, domain::Track& track) {
@@ -77,8 +122,60 @@ void hydrateRelations(const QSqlDatabase& database, domain::Track& track) {
 } // namespace
 
 Database::~Database() { close(); }
+bool Database::clearScrollPositions() {QSqlQuery query(db_);return query.exec("DELETE FROM settings WHERE key LIKE 'scroll.%'");}
 
-bool Database::open(const QString& path) {
+bool Database::mergeDuplicate(const QVariantMap& duplicate,const QVariantMap& keeper,const QString& hash,bool alias) {
+    if (!db_.transaction()) return false;
+    const auto oldId=duplicate.value("id").toString(), newId=keeper.value("id").toString();
+    const auto oldPath=duplicate.value("path").toString(), newPath=keeper.value("path").toString();
+    auto execute=[&](const QString& sql,const QVariantList& args) {
+        QSqlQuery query(db_); query.prepare(sql); for(const auto& arg:args)query.addBindValue(arg); return query.exec();
+    };
+    QSqlQuery check(db_); check.prepare("SELECT COUNT(*) FROM tracks WHERE (track_id=? AND replace(local_path,'\\','/')=? COLLATE NOCASE) OR (track_id=? AND replace(local_path,'\\','/')=? COLLATE NOCASE)");
+    for(const auto& arg:{oldId,oldPath,newId,newPath}) check.addBindValue(arg);
+    if (oldId==newId || !check.exec() || !check.next() || check.value(0).toInt()!=2) {db_.rollback();return false;}
+    bool ok=execute("UPDATE playlist_entries SET track_id=? WHERE track_id=?",{newId,oldId}) &&
+            execute("UPDATE play_history SET track_id=? WHERE track_id=?",{newId,oldId});
+    // The portable collection/queue snapshots contain mixed local and online identities.
+    const auto redirect=[&](auto&& self,QJsonValue value)->QJsonValue {
+        if(value.isArray()){QJsonArray result;for(const auto& child:value.toArray())result.append(self(self,child));return result;}
+        if(!value.isObject())return value;
+        auto object=value.toObject();
+        if(QDir::fromNativeSeparators(object.value("localPath").toString()).compare(oldPath,Qt::CaseInsensitive)==0){
+            object["localPath"]=newPath;object["trackId"]=newId;
+            object.remove("artwork");
+        }
+        for(auto it=object.begin();it!=object.end();++it)if(it.value().isObject()||it.value().isArray())it.value()=self(self,it.value());
+        return object;
+    };
+    for(const auto& key:{QString("collections.v1"),QString("portable.queue")}) {
+        const auto raw=getSetting(key); if(!raw)continue;
+        const auto document=QJsonDocument::fromJson(QByteArray::fromStdString(*raw));
+        const auto result=redirect(redirect,document.isArray()?QJsonValue(document.array()):QJsonValue(document.object()));
+        ok=ok && setSetting(key,QString::fromUtf8((result.isArray()?QJsonDocument(result.toArray()):QJsonDocument(result.toObject())).toJson(QJsonDocument::Compact)));
+    }
+    if(alias)ok=ok && execute("INSERT OR REPLACE INTO duplicate_aliases(path,keeper_id,keeper_path,hash,size_bytes,modified_ms) VALUES(?,?,?,?,?,?)",
+        {oldPath,newId,newPath,hash,duplicate.value("size"),duplicate.value("modified")});
+    ok=ok && execute("UPDATE duplicate_aliases SET keeper_id=?,keeper_path=? WHERE keeper_id=?",{newId,newPath,oldId});
+    ok=ok && execute("DELETE FROM tracks WHERE track_id=?",{oldId});
+    if(ok && db_.commit())return true;
+    db_.rollback();return false;
+}
+
+bool Database::applySettings(const QVariantMap& values, const QStringList& addedRoots, const std::function<bool()>& applyRuntime) {
+    if (!db_.transaction()) return false;
+    for (auto it=values.begin();it!=values.end();++it) {
+        if (!setSetting(it.key(),it.value().toString())) { db_.rollback(); return false; }
+    }
+    for (const auto& root:addedRoots) {
+        if (!addLibraryFolder(root)) { db_.rollback(); return false; }
+    }
+    if (applyRuntime && !applyRuntime()) {db_.rollback();return false;}
+    if (db_.commit()) return true;
+    db_.rollback(); return false;
+}
+
+bool Database::connect(const QString& path) {
     close();
     connectionName_ = QStringLiteral("listenfree_%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     db_ = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName_);
@@ -87,12 +184,20 @@ bool Database::open(const QString& path) {
         close();
         return false;
     }
+    applyConnectionPragmas(db_);
+    return true;
+}
+
+bool Database::open(const QString& path) {
+    if (!connect(path)) return false;
     if (!migrate()) {
         close();
         return false;
     }
     return true;
 }
+
+bool Database::openExisting(const QString& path) { return connect(path); }
 
 void Database::close() noexcept {
     if (connectionName_.isEmpty()) return;
@@ -129,13 +234,33 @@ bool Database::migrate() {
         const bool applied = existing.next();
         if (applied) {
             const QString storedChecksum = existing.value(0).toString();
+            existing.finish();
             const bool legacyBootstrap = migration.version == 1 &&
                                          storedChecksum == QStringLiteral("bootstrap-v1");
-            if (storedChecksum != expectedChecksum && !legacyBootstrap) {
+            // A portable build shipped v4 before its keeper foreign key was
+            // added. Accept only that exact historical checksum, and upgrade
+            // the actual table before recording the current checksum.
+            const bool legacyAliases = migration.version == 4 && storedChecksum ==
+                QStringLiteral("9730c9c84b3dd5e4c8d9783d056aa8483f9f287bc0abc8f8167b5f83a3198412");
+            if (storedChecksum != expectedChecksum && !legacyBootstrap && !legacyAliases) {
                 rollback(db_);
                 return false;
             }
-            if (legacyBootstrap) {
+            if (legacyAliases) {
+                const QStringList upgradeStatements{
+                    QStringLiteral("ALTER TABLE duplicate_aliases RENAME TO duplicate_aliases_legacy_v4"),
+                    migration.statements.front(),
+                    // Aliases whose keeper was already removed are stale scan
+                    // hints. Removing those hints lets the file be rediscovered.
+                    QStringLiteral("INSERT INTO duplicate_aliases(path,keeper_id,keeper_path,hash,size_bytes,modified_ms) SELECT a.path,a.keeper_id,a.keeper_path,a.hash,a.size_bytes,a.modified_ms FROM duplicate_aliases_legacy_v4 a JOIN tracks t ON t.track_id=a.keeper_id"),
+                    QStringLiteral("DROP TABLE duplicate_aliases_legacy_v4")
+                };
+                for (const auto& statement : upgradeStatements) {
+                    QSqlQuery upgrade(db_);
+                    if (!upgrade.exec(statement)) { rollback(db_); return false; }
+                }
+            }
+            if (legacyBootstrap || legacyAliases) {
                 QSqlQuery upgrade(db_);
                 upgrade.prepare(QStringLiteral(
                     "UPDATE schema_migrations SET checksum = ? WHERE version = ?"));
@@ -179,12 +304,34 @@ bool Database::upsertTrack(const domain::Track& track) {
     return upsertTracks(tracks);
 }
 
+UpsertStatements::UpsertStatements(QSqlDatabase& database)
+    : track(database), clearArtists(database), clearAlbums(database), clearFiles(database),
+      artist(database), linkArtist(database), album(database), linkAlbum(database), localFile(database) {
+    track.prepare(QStringLiteral("INSERT INTO tracks(track_id,title,duration_ms,local_path,remote_url) VALUES(?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET title=excluded.title,duration_ms=excluded.duration_ms,local_path=excluded.local_path,remote_url=excluded.remote_url"));
+    clearArtists.prepare(QStringLiteral("DELETE FROM track_artists WHERE track_id = ?"));
+    clearAlbums.prepare(QStringLiteral("DELETE FROM track_albums WHERE track_id = ?"));
+    clearFiles.prepare(QStringLiteral("DELETE FROM local_files WHERE track_id = ?"));
+    artist.prepare(QStringLiteral(
+        "INSERT INTO artists(artist_id,name) VALUES(?,?) "
+        "ON CONFLICT(artist_id) DO UPDATE SET name=excluded.name"));
+    linkArtist.prepare(QStringLiteral("INSERT INTO track_artists(track_id,artist_id,ordinal) VALUES(?,?,?)"));
+    album.prepare(QStringLiteral(
+        "INSERT INTO albums(album_id,title,artwork_url) VALUES(?,?,?) "
+        "ON CONFLICT(album_id) DO UPDATE SET title=excluded.title,artwork_url=excluded.artwork_url"));
+    linkAlbum.prepare(QStringLiteral("INSERT INTO track_albums(track_id,album_id) VALUES(?,?)"));
+    localFile.prepare(QStringLiteral(
+            "INSERT INTO local_files(canonical_path,track_id,size_bytes,modified_ms) "
+            "VALUES(?,?,?,?) ON CONFLICT(canonical_path) DO UPDATE SET "
+            "track_id=excluded.track_id,size_bytes=excluded.size_bytes,modified_ms=excluded.modified_ms"));
+}
+
 bool Database::upsertTracks(std::span<const domain::Track> tracks) {
     if (!isOpen()) return false;
     QSqlQuery begin(db_);
     if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
+    UpsertStatements statements(db_);
     for (const auto& track : tracks) {
-        if (!upsertTrackRows(track)) {
+        if (!upsertTrackRows(track, statements)) {
             rollback(db_);
             return false;
         }
@@ -198,10 +345,19 @@ bool Database::upsertTracks(std::span<const domain::Track> tracks) {
 }
 
 bool Database::upsertTrackRows(const domain::Track& track) {
+    UpsertStatements statements(db_);
+    return upsertTrackRows(track, statements);
+}
+
+bool Database::upsertTrackRows(const domain::Track& track, UpsertStatements& statements) {
     if (track.id.empty()) return false;
     const QString trackId = QString::fromStdString(track.id.value());
-    QSqlQuery query(db_);
-    query.prepare(QStringLiteral("INSERT INTO tracks(track_id,title,duration_ms,local_path,remote_url) VALUES(?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET title=excluded.title,duration_ms=excluded.duration_ms,local_path=excluded.local_path,remote_url=excluded.remote_url"));
+    if(track.localPath) {
+        QSqlQuery clearAlias(db_); clearAlias.prepare("DELETE FROM duplicate_aliases WHERE path=?");
+        clearAlias.addBindValue(QDir::fromNativeSeparators(QString::fromStdString(*track.localPath)));
+        if(!clearAlias.exec())return false;
+    }
+    QSqlQuery& query = statements.track;
     query.addBindValue(trackId);
     query.addBindValue(QString::fromStdString(track.title));
     query.addBindValue(track.duration.count());
@@ -211,32 +367,27 @@ bool Database::upsertTrackRows(const domain::Track& track) {
         rollback(db_);
         return false;
     }
-    for (const QString& table : {QStringLiteral("track_artists"), QStringLiteral("track_albums"),
-                                 QStringLiteral("local_files")}) {
-        QSqlQuery clear(db_);
-        clear.prepare(QStringLiteral("DELETE FROM %1 WHERE track_id = ?").arg(table));
-        clear.addBindValue(trackId);
-        if (!clear.exec()) {
+    query.finish();
+    for (QSqlQuery* clear : {&statements.clearArtists, &statements.clearAlbums, &statements.clearFiles}) {
+        clear->addBindValue(trackId);
+        if (!clear->exec()) {
             rollback(db_);
             return false;
         }
+        clear->finish();
     }
     int ordinal = 0;
     for (const auto& artist : track.artists) {
         if (artist.id.empty() || artist.name.empty()) continue;
-        QSqlQuery upsertArtist(db_);
-        upsertArtist.prepare(QStringLiteral(
-            "INSERT INTO artists(artist_id,name) VALUES(?,?) "
-            "ON CONFLICT(artist_id) DO UPDATE SET name=excluded.name"));
+        QSqlQuery& upsertArtist = statements.artist;
         upsertArtist.addBindValue(QString::fromStdString(artist.id));
         upsertArtist.addBindValue(QString::fromStdString(artist.name));
         if (!upsertArtist.exec()) {
             rollback(db_);
             return false;
         }
-        QSqlQuery link(db_);
-        link.prepare(QStringLiteral(
-            "INSERT INTO track_artists(track_id,artist_id,ordinal) VALUES(?,?,?)"));
+        upsertArtist.finish();
+        QSqlQuery& link = statements.linkArtist;
         link.addBindValue(trackId);
         link.addBindValue(QString::fromStdString(artist.id));
         link.addBindValue(ordinal++);
@@ -244,12 +395,10 @@ bool Database::upsertTrackRows(const domain::Track& track) {
             rollback(db_);
             return false;
         }
+        link.finish();
     }
     if (track.album && !track.album->id.empty() && !track.album->title.empty()) {
-        QSqlQuery upsertAlbum(db_);
-        upsertAlbum.prepare(QStringLiteral(
-            "INSERT INTO albums(album_id,title,artwork_url) VALUES(?,?,?) "
-            "ON CONFLICT(album_id) DO UPDATE SET title=excluded.title,artwork_url=excluded.artwork_url"));
+        QSqlQuery& upsertAlbum = statements.album;
         upsertAlbum.addBindValue(QString::fromStdString(track.album->id));
         upsertAlbum.addBindValue(QString::fromStdString(track.album->title));
         upsertAlbum.addBindValue(track.album->artworkUrl
@@ -259,24 +408,21 @@ bool Database::upsertTrackRows(const domain::Track& track) {
             rollback(db_);
             return false;
         }
-        QSqlQuery link(db_);
-        link.prepare(QStringLiteral("INSERT INTO track_albums(track_id,album_id) VALUES(?,?)"));
+        upsertAlbum.finish();
+        QSqlQuery& link = statements.linkAlbum;
         link.addBindValue(trackId);
         link.addBindValue(QString::fromStdString(track.album->id));
         if (!link.exec()) {
             rollback(db_);
             return false;
         }
+        link.finish();
     }
     if (track.localPath) {
         const QFileInfo file(QString::fromStdString(*track.localPath));
         const QString canonicalPath = file.canonicalFilePath();
         if (!canonicalPath.isEmpty() && file.isFile()) {
-            QSqlQuery localFile(db_);
-            localFile.prepare(QStringLiteral(
-                "INSERT INTO local_files(canonical_path,track_id,size_bytes,modified_ms) "
-                "VALUES(?,?,?,?) ON CONFLICT(canonical_path) DO UPDATE SET "
-                "track_id=excluded.track_id,size_bytes=excluded.size_bytes,modified_ms=excluded.modified_ms"));
+            QSqlQuery& localFile = statements.localFile;
             localFile.addBindValue(canonicalPath);
             localFile.addBindValue(trackId);
             localFile.addBindValue(file.size());
@@ -285,25 +431,62 @@ bool Database::upsertTrackRows(const domain::Track& track) {
                 rollback(db_);
                 return false;
             }
+            localFile.finish();
         }
     }
     return true;
 }
 
 std::vector<domain::Track> Database::loadTracks() const {
+    // Set-based hydration: one query per relation table merged in memory,
+    // instead of two relation queries per track (the old N+1 pattern).
     std::vector<domain::Track> result;
     if (!isOpen()) return result;
-    QSqlQuery query(db_);
-    if (!query.exec(QStringLiteral("SELECT track_id,title,duration_ms,local_path,remote_url FROM tracks ORDER BY title"))) return result;
-    while (query.next()) {
-        domain::Track track;
-        track.id = domain::TrackId(query.value(0).toString().toStdString());
-        track.title = query.value(1).toString().toStdString();
-        track.duration = std::chrono::milliseconds(query.value(2).toLongLong());
-        if (!query.value(3).isNull()) track.localPath = query.value(3).toString().toStdString();
-        if (!query.value(4).isNull()) track.remoteUrl = query.value(4).toString().toStdString();
-        hydrateRelations(db_, track);
-        result.push_back(std::move(track));
+    std::unordered_map<std::string, std::size_t> byId;
+    {
+        QSqlQuery query(db_);
+        if (!query.exec(QStringLiteral("SELECT track_id,title,duration_ms,local_path,remote_url FROM tracks ORDER BY title"))) return result;
+        while (query.next()) {
+            domain::Track track;
+            track.id = domain::TrackId(query.value(0).toString().toStdString());
+            track.title = query.value(1).toString().toStdString();
+            track.duration = std::chrono::milliseconds(query.value(2).toLongLong());
+            if (!query.value(3).isNull()) track.localPath = query.value(3).toString().toStdString();
+            if (!query.value(4).isNull()) track.remoteUrl = query.value(4).toString().toStdString();
+            byId.emplace(track.id.value(), result.size());
+            result.emplace_back(std::move(track));
+        }
+    }
+    {
+        QSqlQuery artists(db_);
+        artists.prepare(QStringLiteral(
+            "SELECT ta.track_id,a.artist_id,a.name FROM track_artists ta JOIN artists a ON a.artist_id=ta.artist_id "
+            "ORDER BY ta.track_id,ta.ordinal"));
+        if (artists.exec()) {
+            while (artists.next()) {
+                const auto track = byId.find(artists.value(0).toString().toStdString());
+                if (track == byId.end()) continue;
+                result[track->second].artists.push_back({artists.value(1).toString().toStdString(),
+                                                  artists.value(2).toString().toStdString()});
+            }
+        }
+    }
+    {
+        QSqlQuery albums(db_);
+        albums.prepare(QStringLiteral(
+            "SELECT ta.track_id,a.album_id,a.title,a.artwork_url FROM track_albums ta "
+            "JOIN albums a ON a.album_id=ta.album_id"));
+        if (albums.exec()) {
+            while (albums.next()) {
+                const auto track = byId.find(albums.value(0).toString().toStdString());
+                if (track == byId.end()) continue;
+                domain::Album value;
+                value.id = albums.value(1).toString().toStdString();
+                value.title = albums.value(2).toString().toStdString();
+                if (!albums.value(3).isNull()) value.artworkUrl = albums.value(3).toString().toStdString();
+                result[track->second].album = std::move(value);
+            }
+        }
     }
     return result;
 }
@@ -321,7 +504,89 @@ std::vector<application::LocalFileFingerprint> Database::loadLocalFiles() const 
                           static_cast<std::uintmax_t>(query.value(1).toULongLong()),
                           query.value(2).toLongLong()});
     }
+    QSqlQuery aliases(db_);
+    if(aliases.exec("SELECT path,size_bytes,modified_ms,hash,keeper_path FROM duplicate_aliases"))while(aliases.next()) {
+        result.push_back({std::filesystem::path(aliases.value(0).toString().toStdWString()),
+            static_cast<std::uintmax_t>(aliases.value(1).toULongLong()),aliases.value(2).toLongLong(),
+            aliases.value(3).toString().toStdString(),std::filesystem::path(aliases.value(4).toString().toStdWString())});
+    }
     return result;
+}
+
+QVariantList Database::loadLibraryFolders() const {
+    if (!isOpen()) return {};
+
+    QVariantList folders;
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral("SELECT folder_id,path FROM library_folders ORDER BY folder_id"));
+    if (!query.exec()) return {};
+    while (query.next()) folders.push_back(QVariantList{query.value(0), query.value(1)});
+    return folders;
+}
+
+bool Database::addLibraryFolder(const QString& path) {
+    if (!isOpen()) return false;
+    const QString normalized = normalizedLibraryFolder(path);
+    if (normalized.isEmpty()) return false;
+
+    QSqlQuery lookup(db_);
+    lookup.prepare(QStringLiteral("SELECT 1 FROM library_folders WHERE path = ? COLLATE NOCASE"));
+    lookup.addBindValue(normalized);
+    if (!lookup.exec()) return false;
+    if (lookup.next()) return false;
+
+    QSqlQuery insert(db_);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO library_folders(path, added_ms) VALUES (?, ?) "
+        "ON CONFLICT(path) DO NOTHING"));
+    insert.addBindValue(normalized);
+    insert.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    if (!insert.exec()) return false;
+    return insert.numRowsAffected() == 1;
+}
+
+bool Database::removeLibraryFolder(std::int64_t id, const QString& path) {
+    if (!isOpen()) return false;
+    const QString normalized = normalizedLibraryFolder(path);
+    if (normalized.isEmpty()) return false;
+
+    QSqlQuery transaction(db_);
+    if (!transaction.exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
+
+    QSqlQuery lookup(db_);
+    lookup.prepare(QStringLiteral("SELECT folder_id,path FROM library_folders WHERE folder_id = ?"));
+    lookup.addBindValue(id);
+    if (!lookup.exec() || !lookup.next()) {
+        rollback(db_);
+        return false;
+    }
+    const QString storedPath = lookup.value(1).toString();
+    if (QString::compare(storedPath, normalized, Qt::CaseInsensitive) != 0) {
+        rollback(db_);
+        return false;
+    }
+
+    QSqlQuery tracks(db_);
+    tracks.prepare(QStringLiteral(
+        "DELETE FROM tracks WHERE track_id IN ("
+        "SELECT track_id FROM local_files WHERE canonical_path LIKE ? ESCAPE '\\')"));
+    tracks.addBindValue(libraryPrefixPattern(storedPath));
+    if (!tracks.exec()) {
+        rollback(db_);
+        return false;
+    }
+
+    QSqlQuery remove(db_);
+    remove.prepare(QStringLiteral("DELETE FROM library_folders WHERE folder_id = ?"));
+    remove.addBindValue(id);
+    if (!remove.exec()) {
+        rollback(db_);
+        return false;
+    }
+
+    QSqlQuery commit(db_);
+    if (!commit.exec(QStringLiteral("COMMIT"))) return false;
+    return remove.numRowsAffected() > 0;
 }
 
 std::vector<domain::Playlist> Database::loadPlaylists() const {
@@ -467,3 +732,53 @@ bool Database::setSetting(const QString& key, const QString& value, const QStrin
 }
 
 } // namespace listenfree::infrastructure::database
+
+namespace listenfree::infrastructure::database {
+bool Database::clearLibraryIndex() {
+    if (!db_.transaction()) return false;
+    QSqlQuery query(db_);
+    if (!query.exec("DELETE FROM tracks") || !query.exec("DELETE FROM albums") || !query.exec("DELETE FROM artists")) { db_.rollback(); return false; }
+    return db_.commit();
+}
+
+bool Database::restoreMissingRelations(std::span<const domain::Track> tracks) {
+    if (!isOpen()) return false;
+    QSqlQuery transaction(db_);
+    if (!transaction.exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
+    UpsertStatements statements(db_);
+    statements.artist.prepare(QStringLiteral("INSERT OR IGNORE INTO artists(artist_id,name) VALUES(?,?)"));
+    statements.album.prepare(QStringLiteral("INSERT OR IGNORE INTO albums(album_id,title,artwork_url) VALUES(?,?,?)"));
+    const auto execute = [](QSqlQuery& query, const QVariantList& values) {
+        for (const auto& value : values) query.addBindValue(value);
+        const bool ok = query.exec(); query.finish(); return ok;
+    };
+    for (const auto& track : tracks) {
+        const auto current = findTrack(track.id);
+        if (!current) continue;
+        const auto id = QString::fromStdString(track.id.value());
+        if (current->artists.empty()) {
+            int ordinal = 0;
+            for (const auto& artist : track.artists) {
+                if (artist.id.empty() || artist.name.empty()) continue;
+                const auto artistId = QString::fromStdString(artist.id);
+                if (!execute(statements.artist, {artistId, QString::fromStdString(artist.name)}) ||
+                    !execute(statements.linkArtist, {id, artistId, ordinal++})) { rollback(db_); return false; }
+            }
+        }
+        if (!current->album && track.album && !track.album->id.empty()) {
+            const auto albumId = QString::fromStdString(track.album->id);
+            if (!execute(statements.album, {albumId, QString::fromStdString(track.album->title),
+                    track.album->artworkUrl ? QVariant(QString::fromStdString(*track.album->artworkUrl)) : QVariant{}}) ||
+                !execute(statements.linkAlbum, {id, albumId})) { rollback(db_); return false; }
+        }
+    }
+    if (!transaction.exec(QStringLiteral("COMMIT"))) { rollback(db_); return false; }
+    return true;
+}
+bool Database::removeTrack(const QString& id) {
+    QSqlQuery query(db_);
+    query.prepare("DELETE FROM tracks WHERE track_id = ?");
+    query.addBindValue(id);
+    return query.exec();
+}
+}

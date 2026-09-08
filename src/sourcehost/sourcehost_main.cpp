@@ -12,6 +12,24 @@
 
 namespace {
 
+constexpr qsizetype MaxProtocolFrameBytes = 1024 * 1024 + 4;
+
+void writeResponse(listenfree::sourcehost::SourceMessage response) {
+    QByteArray encoded = listenfree::sourcehost::SourceProtocol::encode(response);
+    if (encoded.size() > MaxProtocolFrameBytes) {
+        response.type = listenfree::sourcehost::MessageType::Error;
+        response.payload = {
+            {QStringLiteral("code"), QStringLiteral("plugin.response-too-large")},
+            {QStringLiteral("message"),
+             QStringLiteral("Plugin response exceeds the 1 MiB protocol limit.")},
+        };
+        encoded = listenfree::sourcehost::SourceProtocol::encode(response);
+    }
+    if (encoded.size() > MaxProtocolFrameBytes) return;
+    std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
+    std::cout.flush();
+}
+
 class StdinReader final : public QThread {
 public:
     using Handler = std::function<void(QByteArray)>;
@@ -64,9 +82,7 @@ int main(int argc, char* argv[]) {
     listenfree::sourcehost::PluginRuntime pluginRuntime;
     QObject::connect(&pluginRuntime, &listenfree::sourcehost::PluginRuntime::responseReady, &app,
                      [](const listenfree::sourcehost::SourceMessage& response) {
-                         const QByteArray encoded = listenfree::sourcehost::SourceProtocol::encode(response);
-                         std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
-                         std::cout.flush();
+                         writeResponse(response);
                      });
 
     StdinReader reader([&app, &pluginRuntime](QByteArray frame) {
@@ -95,9 +111,7 @@ int main(int argc, char* argv[]) {
         response.payload.insert(QStringLiteral("ok"), true);
         response.payload.insert(QStringLiteral("messageType"),
                                 listenfree::sourcehost::SourceProtocol::typeName(request.type));
-        const QByteArray encoded = listenfree::sourcehost::SourceProtocol::encode(response);
-        std::cout.write(encoded.constData(), static_cast<std::streamsize>(encoded.size()));
-        std::cout.flush();
+        writeResponse(std::move(response));
     });
     reader.start();
     const int exitCode = app.exec();
