@@ -1,4 +1,5 @@
 #pragma once
+#include "artwork_texture_factory.h"
 #include <QQuickImageProvider>
 #include <QUrl>
 #include <QJsonArray>
@@ -19,7 +20,10 @@
 class CoverImageProvider final : public QQuickImageProvider {
     static QImage readScaled(QImageReader& reader, const QSize& bounds) {
         const auto original = reader.size();
-        if (original.isValid()) reader.setScaledSize(original.scaled(bounds, Qt::KeepAspectRatio));
+        // sourceSize is a decode budget, not an instruction to inflate a small
+        // embedded cover. Preserve every source pixel and let Qt sample it.
+        if (original.isValid() && (original.width() > bounds.width() || original.height() > bounds.height()))
+            reader.setScaledSize(original.scaled(bounds, Qt::KeepAspectRatio));
         return reader.read();
     }
     static QImage loadArtwork(const QString& id, const QSize& bounds) {
@@ -52,7 +56,10 @@ class CoverImageProvider final : public QQuickImageProvider {
         return image;
     }
 public:
-    CoverImageProvider() : QQuickImageProvider(QQuickImageProvider::Image, QQmlImageProviderBase::ForceAsynchronousImageLoading) {}
+    CoverImageProvider() : QQuickImageProvider(QQuickImageProvider::Texture, QQmlImageProviderBase::ForceAsynchronousImageLoading) {}
+    QQuickTextureFactory* requestTexture(const QString& id, QSize* size, const QSize& requested) override {
+        return new ArtworkTextureFactory(requestImage(id, size, requested));
+    }
     QImage requestImage(const QString& id, QSize* size, const QSize& requested) override {
         QImage image;
         // Qt Quick may supply only one sourceSize axis (the other is zero).
@@ -72,7 +79,8 @@ public:
         // A transparent one-pixel sentinel lets CoverArt distinguish a missing
         // cover from real artwork without emitting an image-loading error.
         if (image.isNull()) { image = QImage(1, 1, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent); }
-        else image = image.scaled(bounds, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        else if (image.width() > bounds.width() || image.height() > bounds.height())
+            image = image.scaled(bounds, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         if (size) *size = image.size();
         return image;
     }

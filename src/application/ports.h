@@ -38,6 +38,7 @@ struct LocalFileFingerprint {
     std::int64_t modifiedMs{0};
     std::string duplicateHash;
     std::filesystem::path keeperPath;
+    bool excluded{false};
 };
 
 struct LibraryFolder {

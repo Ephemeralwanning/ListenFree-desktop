@@ -29,7 +29,7 @@ Item {
     Image {
         id: accentSample; objectName: "foliaAccentSample"
         x: -128; width: 64; height: 64
-        source: pv.style==="claddagh" ? pv.artwork : ""
+        source: (pv.style==="claddagh" || pv.style==="diorama") ? pv.artwork : ""
         sourceSize: Qt.size(64,64); fillMode: Image.PreserveAspectFit
         asynchronous: true
         onSourceChanged: {
@@ -57,7 +57,7 @@ Item {
             endMs:lineIndex+1<pv.lyrics.length?Number(pv.lyrics[lineIndex+1].timeMs):startMs+5000
         }
     }
-    FoliaDecor { anchors.fill:parent;scene:nativeScene }
+    FoliaDecor { anchors.fill:parent;scene:nativeScene;clip:true }
     FoliaScene {
         id: nativeScene; objectName: "foliaNativeScene"
         anchors.fill: parent
@@ -103,10 +103,11 @@ Item {
                     font.italic: letter.node.italic||false
                     color: letter.ink
                     opacity: pv.style==="claddagh" && !pv.reducedMotion ? 1-Math.min(1,letter.defocus/2) : 1
-                    renderType: pv.style==="claddagh" ? Text.CurveRendering : Text.QtRendering
-                    // Other scenes keep their existing bounded defocus layers;
-                    // the orbit's sharp body never enters this raster layer.
+                    renderType: (pv.style==="claddagh" || pv.style==="diorama") ? Text.CurveRendering : Text.QtRendering
+                    // Focused orbit/diorama glyphs remain native curves at any
+                    // zoom/DPR; only defocused planes need raster layers.
                     layer.enabled: visible && !pv.reducedMotion && letter.opacity>0.005 &&
+                                   !(pv.style==="diorama" && letter.defocus===0) &&
                                    (pv.style==="classic"||pv.style==="cadenza"||pv.style==="diorama"||pv.style==="monet")
                     layer.textureSize: Qt.size(Math.ceil(width),Math.ceil(height))
                     // These two scenes have no glow and keep the focused row

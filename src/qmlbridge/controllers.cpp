@@ -1,6 +1,7 @@
 #include "qmlbridge/controllers.h"
 
 #include "application/playback_service.h"
+#include "infrastructure/database/database.h"
 #if defined(LISTENFREE_HAS_MPV)
 #include "media/mpv_audio_player.h"
 #endif
@@ -138,6 +139,9 @@ void LibraryController::beginScan(const QStringList& roots, bool recursive) {
     if(maintenance_) { setLastError(tr("资料库维护正在进行，请稍后扫描。")); return; }
 
     const auto generation = ++generation_;
+    activeScanRoots_=roots;activeScanRecursive_=recursive;
+    finishPending_=false;
+    pendingOutcome_={};
     activeScanId_.reset();
     if (importedCount_ != 0) {
         importedCount_ = 0;
@@ -254,6 +258,7 @@ void LibraryController::cancel() {
 void LibraryController::cancelActiveScan() {
     if (!scanning_) return;
     const auto generation = generation_;
+    writer_->cancelReconciliation(generation);
     const auto activeScanId = activeScanId_;
     finish(generation, {application::ScanStatus::Cancelled, {}});
     if (activeScanId) scanner_.cancel(*activeScanId);
@@ -291,6 +296,13 @@ void LibraryController::handleDrained() {
 }
 
 void LibraryController::handleFinished(std::uint64_t generation, application::ScanOutcome outcome) {
+    if(generation == generation_ && scanning_ && !databasePath_.isEmpty()
+       && !finishPending_ && outcome.status == application::ScanStatus::Completed) {
+        ++pendingCommits_;
+        QMetaObject::invokeMethod(writer_.get(), [writer=writer_.get(),generation,roots=activeScanRoots_,recursive=activeScanRecursive_] {
+            writer->reconcile(generation,roots,recursive);
+        },Qt::QueuedConnection);
+    }
     finish(generation, std::move(outcome));
 }
 
@@ -543,6 +555,13 @@ QVariantMap PlayerController::currentTrack() const {
 }
 
 void LibraryController::scanDefault() {
+    if(maintenance_)return;
+    if(!databasePath_.isEmpty()) {
+        infrastructure::database::Database database;
+        if(!database.openExisting(databasePath_) || !database.restoreExcludedFiles(roots_)) {
+            setLastError(QStringLiteral("无法重新导入已移除的歌曲"));return;
+        }
+    }
     scan(roots_);
 }
 

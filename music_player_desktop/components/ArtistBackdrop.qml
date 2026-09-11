@@ -113,7 +113,7 @@ Item {
         Image {
             id: photo
             objectName: "artistPhotoLoader"
-            source: portrait.artwork
+            source: AppTheme.textureUrl(portrait.artwork)
             sourceSize.width: 2048
             asynchronous: true; visible: false; mipmap: true
             function tryFallback() {

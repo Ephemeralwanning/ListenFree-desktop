@@ -1,4 +1,4 @@
-ListenFree 0.3.1 第三方组件与修改说明
+ListenFree 0.3.2 第三方组件与修改说明
 
 Qt 6.11.2：Core、Gui、Widgets、Quick/QML、Network、Sql、Concurrent、Multimedia 和 ShaderTools。
 Qt Multimedia 的 Windows MMCSS 修复见 patches/qt/6.11.2。
@@ -32,3 +32,13 @@ utf8cpp（Boost Software License）：TagLib 使用的 UTF-8 支持。
 Qt Image Formats 6.11.2：未修改的官方 WebP 图片插件（Qt LGPL-3.0 等许可）。
 https://github.com/qt/qtimageformats/tree/v6.11.2
 该插件包含 libwebp 1.6.0（BSD-3-Clause），许可与专利授权见 libwebp-COPYING.txt、libwebp-PATENTS.txt。
+
+Microsoft C++/WinRT 2.0.250303.1
+来源：https://github.com/microsoft/cppwinrt / Microsoft.Windows.CppWinRT NuGet
+许可证：MIT，见 CppWinRT-MIT.txt。
+用途：构建期生成 Windows 媒体会话公开 API 的 C++ 头文件，不附加常驻进程或运行时。
+
+vlc-win10smtc，参考版本 7c369d682ca43c657783e6f071917dfc0a9122fc
+来源：https://github.com/spmn/vlc-win10smtc
+许可证：GPL-3.0，见 vlc-win10smtc-GPL-3.0.txt。
+修改范围：Windows SMTC 的窗口绑定、增量推送及 IStream 缩略图桥接方式适配到 Qt；不包含 VLC 播放引擎或插件运行环境。

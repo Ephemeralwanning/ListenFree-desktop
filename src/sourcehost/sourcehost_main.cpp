@@ -10,6 +10,11 @@
 #include <iostream>
 #include <utility>
 
+#ifdef Q_OS_WIN
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace {
 
 constexpr qsizetype MaxProtocolFrameBytes = 1024 * 1024 + 4;
@@ -78,6 +83,13 @@ private:
 } // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_WIN
+    // The four-byte frame length is binary. Text mode treats 0x1A as EOF
+    // and translates CR/LF, corrupting otherwise valid requests/responses.
+    if (_setmode(_fileno(stdin), _O_BINARY) == -1 ||
+        _setmode(_fileno(stdout), _O_BINARY) == -1)
+        return 4;
+#endif
     QCoreApplication app(argc, argv);
     listenfree::sourcehost::PluginRuntime pluginRuntime;
     QObject::connect(&pluginRuntime, &listenfree::sourcehost::PluginRuntime::responseReady, &app,

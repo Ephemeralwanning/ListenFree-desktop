@@ -11,7 +11,18 @@ TrackListModel::TrackListModel(QObject* parent) : QAbstractListModel(parent) {}
 
 void TrackListModel::setTracks(std::vector<domain::Track> tracks) {
     beginResetModel();
+    rows_.clear();
+    rowStorage_ = false;
     tracks_ = std::move(tracks);
+    endResetModel();
+    emit countChanged();
+}
+
+void TrackListModel::setRows(QVariantList rows) {
+    beginResetModel();
+    std::vector<domain::Track>().swap(tracks_);
+    rowStorage_ = true;
+    rows_ = std::move(rows);
     endResetModel();
     emit countChanged();
 }
@@ -25,11 +36,24 @@ QVariantMap TrackListModel::get(int row) const {
 }
 
 int TrackListModel::rowCount(const QModelIndex& parent) const {
-    return parent.isValid() ? 0 : static_cast<int>(tracks_.size());
+    return parent.isValid() ? 0 : static_cast<int>(rowStorage_ ? rows_.size() : tracks_.size());
 }
 
 QVariant TrackListModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()) return {};
+    if (rowStorage_) {
+        const auto row = rows_.at(index.row()).toMap();
+        switch (role) {
+        case Qt::DisplayRole: case TitleRole: return row.value("title").toString();
+        case TrackIdRole: return row.value("trackId").toString();
+        case ArtistRole: return row.value("artist").toString();
+        case AlbumRole: return row.value("album").toString();
+        case DurationRole: return row.value("durationMs", row.value("duration")).toLongLong();
+        case LocalPathRole: return row.value("localPath").toString();
+        case ArtworkRole: return row.value("artwork").toString();
+        default: return {};
+        }
+    }
     const auto& track = tracks_[static_cast<std::size_t>(index.row())];
     switch (role) {
     case Qt::DisplayRole:

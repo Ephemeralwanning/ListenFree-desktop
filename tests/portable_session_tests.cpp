@@ -45,6 +45,92 @@ class PortableTests : public QObject {
     QString mp3_, flac_, third_, originalPcm_;
     QVariantMap local(const QString& path) { return {{"trackId", path}, {"title", QFileInfo(path).completeBaseName()}, {"localPath", path}}; }
 private slots:
+    void sourceReconnectWaitsForSlowShutdown() {
+        qputenv("LISTENFREE_FAULT_MODE", "ignore-stop");
+        qmlbridge::SourceController source(nullptr,
+            QCoreApplication::applicationDirPath()+"/listenfree-sourcehost-fault-host.exe", true);
+        QTRY_VERIFY_WITH_TIMEOUT(source.hostReady(), 5000);
+        QSignalSpy changes(&source, &qmlbridge::SourceController::hostChanged);
+        source.restartHost();
+        source.restartHost(); // Repeated clicks must share one restart.
+        QVERIFY(!source.hostReady());
+        QTRY_VERIFY_WITH_TIMEOUT(source.hostReady(), 5000);
+        QVERIFY(changes.count() >= 3);
+    }
+
+    void selectingSourceRecoversStoppedHost() {
+        qputenv("LISTENFREE_FAULT_MODE", "bad-handshake");
+        infrastructure::database::Database db;
+        QVERIFY(db.open(temporary_.filePath("source-recovery.sqlite")));QVERIFY(db.migrate());
+        infrastructure::database::SettingsRepository repo(db);
+        qmlbridge::SourceController source(&repo,
+            QCoreApplication::applicationDirPath()+"/listenfree-sourcehost-fault-host.exe", true);
+        QFile script(temporary_.filePath("source-recovery.js"));QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("// isolated source recovery fixture\n");script.close();
+        QVERIFY(source.importLocalFile(script.fileName()));
+        QTRY_COMPARE_WITH_TIMEOUT(source.hostState(), QStringLiteral("已停止"), 5000);
+        QVERIFY(source.sources().last().toMap().value("status").toString().contains(QStringLiteral("连接已断开")));
+        qputenv("LISTENFREE_FAULT_MODE", "normal");
+        QVERIFY(source.selectSource(source.activeId()));
+        QTRY_VERIFY_WITH_TIMEOUT(source.hostReady(), 5000);
+    }
+
+    void unavailableSourceDoesNotSkipSelectedSong() {
+        infrastructure::database::Database db;const auto path=temporary_.filePath("source-unavailable.sqlite");
+        QVERIFY(db.open(path));QVERIFY(db.migrate());db.setSetting("playback.skipOnError","true");
+        infrastructure::database::SettingsRepository repo(db);qmlbridge::SourceController source(&repo);
+        qmlbridge::PortableSession player(db,path,source);
+        const QVariantMap song{{"trackId","kw:465071414"},{"rid","465071414"},{"source","kw"},{"title","Online fixture"}};
+        player.playAll({local(mp3_),song});
+        QTRY_VERIFY_WITH_TIMEOUT(player.state()=="Playing" && player.position()>250,8000);
+        QSignalSpy notices(&player,&qmlbridge::PortableSession::notice);
+        player.next();
+        QTRY_VERIFY(!player.errorMessage().isEmpty());
+        QTest::qWait(1200);
+        QCOMPARE(player.currentTrackId(),QString("kw:465071414"));
+        QCOMPARE(player.currentQueueIndex(),1);
+        QVERIFY(!notices.isEmpty());
+        player.stop();
+    }
+
+    void realSourceReconnectAndPlayback() {
+        const auto script=qEnvironmentVariable("LISTENFREE_TEST_SCRIPT");
+        if(script.isEmpty())QSKIP("Requires a user-selected source script");
+        infrastructure::database::Database db;const auto path=temporary_.filePath("source-live-recovery.sqlite");
+        QVERIFY(db.open(path));QVERIFY(db.migrate());db.setSetting("playback.skipOnError","true");
+        infrastructure::database::SettingsRepository repo(db);
+        qmlbridge::SourceController source(&repo,QCoreApplication::applicationDirPath()+"/listenfree-sourcehost.exe",true);
+        QTRY_VERIFY_WITH_TIMEOUT(source.hostReady(),10000);
+        QVERIFY(source.importLocalFile(script));
+        QTRY_VERIFY_WITH_TIMEOUT(source.sources().last().toMap().value("hostReady").toBool(),35000);
+        qmlbridge::PortableSession player(db,path,source);
+        QVariantMap song{{"trackId","kw:465071414"},{"rid","465071414"},{"source","kw"},
+            {"title",QStringLiteral("起风了（DJ旋律）")},{"durationMs",240000}};
+        const auto reportedPath=qEnvironmentVariable("LISTENFREE_TEST_TRACK");
+        if(!reportedPath.isEmpty()) {
+            QFile reported(reportedPath);QVERIFY(reported.open(QIODevice::ReadOnly));
+            const auto document=QJsonDocument::fromJson(reported.readAll());QVERIFY(document.isObject());
+            song=document.object().toVariantMap();QVERIFY(!song.value("rid").toString().isEmpty());
+        }
+        const auto trackId=song.value("trackId").toString();
+        for(int cycle=0;cycle<2;++cycle) {
+            source.restartHost();
+            QTRY_VERIFY_WITH_TIMEOUT(source.hostReady() && source.sources().last().toMap().value("hostReady").toBool(),35000);
+            player.playAll({local(mp3_),song});
+            QTRY_VERIFY_WITH_TIMEOUT(player.state()=="Playing" && player.position()>250,8000);
+            player.next();
+            QTRY_VERIFY2_WITH_TIMEOUT(player.currentTrackId()==trackId && player.state()=="Playing" && player.position()>1200,
+                                     qPrintable(player.errorMessage()),35000);
+            player.pause();QTRY_COMPARE(player.state(),QString("Paused"));
+            player.seek(10000);player.play();
+            QTRY_VERIFY_WITH_TIMEOUT(player.position()>11200 && player.state()=="Playing",20000);
+            QCOMPARE(player.currentTrackId(),trackId);
+            player.previous();
+            QTRY_VERIFY_WITH_TIMEOUT(player.state()=="Playing" && player.currentQueueIndex()==0 && player.position()>250,10000);
+            player.stop();
+        }
+    }
+
     void kugouPlaylistTrackArtwork() {
         // Mobile playlist rows put album artwork inside trans_param.
         const QJsonObject metadata{{"union_cover","https://imge.kugou.com/stdmusic/{size}/album.jpg"}};
@@ -147,9 +233,16 @@ private slots:
             // QML Image with only sourceSize.width can request height 0.
             const auto widthOnly=covers.requestImage(url.mid(QString("image://covers/").size()),nullptr,QSize(2048,0));
             QVERIFY2(widthOnly.width()>1 && widthOnly.height()>1,"A width-only hero request must retain the embedded song cover");
-            QCOMPARE(widthOnly.size(),QSize(2048,1024));
-            QCOMPARE(covers.requestImage(url.mid(15),nullptr,QSize(0,1024)).size(),QSize(2048,1024));
-            QCOMPARE(covers.requestImage(url.mid(15),nullptr,QSize(0,0)).size(),QSize(256,128));
+            // A 64x32 embedded PNG must not become an 8 MiB hero allocation.
+            QCOMPARE(widthOnly,expected);
+            QCOMPARE(covers.requestImage(url.mid(15),nullptr,QSize(0,1024)),expected);
+            QCOMPARE(covers.requestImage(url.mid(15),nullptr,QSize(0,0)),expected);
+            QSize actual;
+            const auto thumbnail=covers.requestImage(url.mid(15),&actual,QSize(16,16));
+            QCOMPARE(actual,QSize(16,8));
+            QCOMPARE(thumbnail.size(),actual);
+            QCOMPARE(thumbnail.pixelColor(8,4),QColor("#da3020"));
+            QCOMPARE(covers.requestImage(url.mid(15),nullptr,QSize(0,8)).size(),QSize(16,8));
         }
     }
     void localMediaContentDetection_data() {
@@ -614,6 +707,7 @@ private slots:
         QTest::newRow("qq")<<QString("tx")<<QString("Animals")<<QString("Maroon 5");
         QTest::newRow("kugou")<<QString("kg")<<QString("红色高跟鞋")<<QString("蔡健雅");
         QTest::newRow("kuwo")<<QString("kw")<<QString("红色高跟鞋")<<QString("蔡健雅");
+        QTest::newRow("migu")<<QString("mg")<<QString("红色高跟鞋")<<QString("蔡健雅");
         QTest::newRow("lrclib")<<QString("lrclib")<<QString("Animals")<<QString("Maroon 5");
         QTest::newRow("amll")<<QString("amll")<<QString("アイドル")<<QString("YOASOBI");
     }
@@ -1022,7 +1116,7 @@ private slots:
         QVERIFY(!mp3_.isEmpty()); QVERIFY(!flac_.isEmpty());
         third_=temporary_.filePath("third-track.mp3");QVERIFY(QFile::copy(mp3_,third_));
     }
-    void cleanup() { qputenv("LISTENFREE_TEST_PCM",originalPcm_.toUtf8()); }
+    void cleanup() { qputenv("LISTENFREE_TEST_PCM",originalPcm_.toUtf8()); qunsetenv("LISTENFREE_FAULT_MODE"); }
     void lyricTimingAndTranslation() {
         const auto rows=online::parseTimedLyrics("[kuwo:072]\n[00:01.00]<800,-800>Hello <2200,-200>world\n[00:01.00]译文\n[00:05.00]Next");
         QCOMPARE(rows.size(),2);
@@ -1343,7 +1437,10 @@ private slots:
         QVERIFY(player.saveTrackTags(row,{{"title",QStringLiteral("测试歌曲")},{"artist","Test Artist"},{"genre","Pop"},{"year","2026"},{"lyrics","[00:01.00]Test lyric"}}));
         const auto tags=player.readTrackTags(row);QCOMPARE(tags.value("title").toString(),QStringLiteral("测试歌曲"));QCOMPARE(tags.value("lyrics").toString(),QString("[00:01.00]Test lyric"));
         QVERIFY(player.saveTrackTags(row,{{"title","Changed"}}));QCOMPARE(player.readTrackTags(row).value("genre").toString(),QString("Pop"));
+        player.reload();
         QVERIFY(player.removeLibraryTrack(row));QVERIFY(QFileInfo::exists(copy));QVERIFY(!db.findTrack(track.id));
+        QTRY_VERIFY(player.songs().isEmpty());QCOMPARE(player.tracksModel()->rowCount(),0);
+        QVERIFY(player.albums().isEmpty());QVERIFY(player.artists().isEmpty());
         QVERIFY(player.enqueueTrack(row));QVERIFY(player.removeLibraryTrack(row,true));QVERIFY(!QFileInfo::exists(copy));QVERIFY(player.queueSongs().isEmpty());
         QVERIFY(!player.showInExplorer(row));
     }

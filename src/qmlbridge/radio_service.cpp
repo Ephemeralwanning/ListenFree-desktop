@@ -18,7 +18,8 @@ RadioService::RadioService(infrastructure::database::Database& db,QObject* paren
     for(const auto* provider:{"icecast","radiobrowser","netease"}) states_.insert(provider,{});
     favorites_=QJsonDocument::fromJson(QByteArray::fromStdString(db_.getSetting("radio.favorites.v1").value_or("[]"))).array().toVariantList();
     connect(&parser_,&QFutureWatcherBase::finished,this,[this] {
-        auto parsed=parser_.result();
+        auto future=parser_.future();
+        auto parsed=future.takeResult();
         if(parsed.second.isEmpty()) {icecast_=std::move(parsed.first);icecastFetched_=QDateTime::currentDateTimeUtc();}
         if(provider_=="icecast" && !favoritesOnly_) {
             busy_=false;error_=parsed.second;

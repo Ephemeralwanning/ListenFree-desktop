@@ -7,6 +7,7 @@ QtObject {
 
     function artworkUrl(source, pixels) {
         let url = String(source || "")
+        if (url.indexOf("image://artwork/") === 0) url = decodeURIComponent(url.substring(16))
         const size = Math.min(2048, pixels)
         if (/music\.126\.net/.test(url)) {
             if (/([?&])param=/.test(url)) url=url.replace(/([?&])param=[^&]+/, "$1param="+size+"y"+size)
@@ -20,7 +21,12 @@ QtObject {
         }
         else if (/kuwo\.cn/.test(url)) url=url.replace(/(\/albumcover\/)\d+\//,"$1"+Math.min(500,size)+"/")
         else if (/kugou\.com/.test(url)) url=url.replace(/(\/stdmusic\/)\d+\//,"$1"+Math.min(480,size)+"/")
-        return url
+        return textureUrl(url)
+    }
+    function textureUrl(source) {
+        const url = String(source || "")
+        return typeof backendArtworkTextures !== "undefined" && backendArtworkTextures && /^https?:\/\//.test(url)
+            ? "image://artwork/" + encodeURIComponent(url) : url
     }
     function artworkPixels(tier, dpr) {
         const sizes = { Thumbnail: 64, Small: 128, Medium: 320, Large: 640, XLarge: 1024, Hero: 1600 }

@@ -16,6 +16,7 @@ public:
     explicit MvFrameStream(QObject* parent=nullptr);
     ~MvFrameStream() override;
     void open(const QUrl& url);
+    void close() { stop(); }
     void synchronize(qint64 positionMs,bool playing,bool seek=false);
     qint64 position() const;
     qint64 duration() const;
@@ -25,6 +26,7 @@ Q_SIGNALS:
     void frameReady(const QVideoFrame& frame);
     void ready();
     void fallbackRequested();
+    void finished();
 private:
     struct Job;
     static void decode(const std::shared_ptr<Job>& job,const QUrl& url);
@@ -37,6 +39,7 @@ private:
     QElapsedTimer lateClock_;
     qint64 anchorMs_=0;
     bool playing_=false,ready_=false;
+    bool endEmitted_=false;
     quint64 presented_=0;
 };
 }

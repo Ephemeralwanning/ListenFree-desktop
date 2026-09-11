@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QThread>
+#include <QStringList>
 
 #include <atomic>
 #include <memory>
@@ -31,6 +32,7 @@ public:
     ~LibraryScanWriter() override;
 
     void setAcceptedGeneration(quint64 generation);
+    void cancelReconciliation(quint64 generation);
 
 public slots:
     // Queued onto the writer thread; the connection is created and used in
@@ -38,6 +40,7 @@ public slots:
     // commit (queued invocations from the GUI preserve ordering).
     void initialize(const QString& databasePath);
     void commit(quint64 generation, std::shared_ptr<std::vector<domain::Track>> batch);
+    void reconcile(quint64 generation, const QStringList& roots, bool recursive);
     void drain();
 
 signals:
@@ -46,8 +49,11 @@ signals:
     void drained();
 
 private:
+    bool ensureDatabase();
     QThread thread_;
     std::shared_ptr<std::atomic<quint64>> acceptedGeneration_;
+    std::atomic<quint64> cancelledReconciliation_{0};
+    quint64 failedGeneration_{0};
     QString databasePath_;
     std::unique_ptr<database::Database> database_;
     std::unique_ptr<database::TrackRepository> repository_;

@@ -123,6 +123,7 @@ private:
   QString hostExecutablePath_;
   bool hostEnabled_{false};
   bool hostAvailable_{false};
+  bool restartRequested_{false};
   QString pendingLoadId_;
   QString pendingLoadSourceId_;
   QHash<QString, PendingResolution> pendingResolutions_;

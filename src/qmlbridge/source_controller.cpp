@@ -1,6 +1,7 @@
 #include "qmlbridge/source_controller.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSaveFile>
@@ -19,6 +20,25 @@
 
 namespace listenfree::qmlbridge {
 namespace {
+
+// Keep a small lifecycle journal so an intermittent startup failure survives
+// a restart. Only fixed event names are passed here; never URLs or script data.
+void recordHostEvent(const QString &event) {
+  const auto dataDir = QCoreApplication::instance()->property("listenfreeDataDir").toString();
+  if (dataDir.isEmpty()) return;
+  QDir directory(QDir(dataDir).filePath(QStringLiteral("logs")));
+  if (!directory.mkpath(QStringLiteral("."))) return;
+  const auto path = directory.filePath(QStringLiteral("sourcehost.log"));
+  if (QFileInfo(path).size() >= 128 * 1024) {
+    QFile::remove(path + QStringLiteral(".1"));
+    if (!QFile::rename(path, path + QStringLiteral(".1"))) return;
+  }
+  QFile file(path);
+  if (file.open(QIODevice::WriteOnly | QIODevice::Append))
+    file.write(QStringLiteral("%1 pid=%2 %3\n")
+        .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))
+        .arg(QCoreApplication::applicationPid()).arg(event).toUtf8());
+}
 
 constexpr qsizetype kMaxPluginBytes = 1024 * 1024;
 
@@ -448,9 +468,19 @@ void SourceController::initializeHost() {
     loadActivePlugin();
   });
   connect(host_.get(), &sourcehost::SourceHostClient::stateChanged, this,
-          [this](sourcehost::SourceHostClient::HostState) {
+          [this](sourcehost::SourceHostClient::HostState state) {
+            recordHostEvent(QStringLiteral("state=%1").arg(hostState()));
             emit hostChanged();
             updateCustomStatuses();
+            if (state == sourcehost::SourceHostClient::HostState::Stopped && restartRequested_) {
+              QTimer::singleShot(0, this, [this] {
+                if (!restartRequested_ || !host_ ||
+                    host_->state() != sourcehost::SourceHostClient::HostState::Stopped)
+                  return;
+                restartRequested_ = false;
+                host_->start();
+              });
+            }
           });
   connect(host_.get(), &sourcehost::SourceHostClient::messageReceived, this,
           &SourceController::handleHostMessage);
@@ -458,6 +488,10 @@ void SourceController::initializeHost() {
           &SourceController::handleHostTerminal);
   connect(host_.get(), &sourcehost::SourceHostClient::protocolError, this,
           [this](const QString &message) {
+            recordHostEvent(message == QStringLiteral("sourcehost-handshake-timeout") ||
+                            message == QStringLiteral("invalid-sourcehost-handshake") ||
+                            message == QStringLiteral("sourcehost-hello-write-failed")
+                                ? message : QStringLiteral("protocol-error"));
             if (!message.trimmed().isEmpty())
               setError(QStringLiteral("音源宿主：%1").arg(message.left(512)));
           });
@@ -471,8 +505,13 @@ void SourceController::initializeHost() {
 }
 
 void SourceController::loadActivePlugin() {
-  if (!hostEnabled_ || !hostAvailable_ || !hostReady())
+  if (!hostEnabled_ || !hostAvailable_)
     return;
+  if (!hostReady()) {
+    if (host_ && host_->state() == sourcehost::SourceHostClient::HostState::Stopped)
+      host_->start();
+    return;
+  }
   const int index = indexOf(activeId_);
   if (index < 0)
     return;
@@ -683,8 +722,14 @@ void SourceController::updateCustomStatuses() {
     bool ready = false;
     if (!hostEnabled_ || !hostAvailable_)
       status = QStringLiteral("待验证");
-    else if (!hostReady())
-      status = QStringLiteral("等待宿主");
+    else if (!hostReady()) {
+      const auto state = host_ ? host_->state() : sourcehost::SourceHostClient::HostState::Stopped;
+      status = state == sourcehost::SourceHostClient::HostState::Stopped
+                   ? QStringLiteral("连接已断开，请重新连接")
+                   : state == sourcehost::SourceHostClient::HostState::RestartWaiting
+                         ? QStringLiteral("正在重新连接")
+                         : QStringLiteral("正在连接音源");
+    }
     else if (id == activeId_ && hostSourceInfo_.isEmpty())
       status = QStringLiteral("待验证");
     else if (id == activeId_ && !hostSourceInfo_.isEmpty()) {
@@ -762,7 +807,8 @@ QString SourceController::resolve(const QString &sourceId,
     return {};
   }
   if (!hostReady()) {
-    setError(hostAvailable_ ? QStringLiteral("音源宿主尚未就绪")
+    loadActivePlugin();
+    setError(hostAvailable_ ? QStringLiteral("音源正在连接，请稍后重试播放")
                             : QStringLiteral("音源宿主不可用"));
     return {};
   }
@@ -860,15 +906,19 @@ void SourceController::restartHost() {
     initializeHost();
     return;
   }
+  if (host_->state() == sourcehost::SourceHostClient::HostState::Stopped) {
+    restartRequested_ = false;
+    host_->start();
+    return;
+  }
+  if (restartRequested_) return;
+  restartRequested_ = true;
+  hostSourceInfo_.clear();
   host_->stop();
-  QTimer::singleShot(120, this, [this] {
-    if (host_ && host_->state() == sourcehost::SourceHostClient::HostState::Stopped)
-      host_->start();
-  });
 }
 
 void SourceController::refresh() {
-  if (hostEnabled_ && hostReady())
+  if (hostEnabled_)
     loadActivePlugin();
   else
     updateCustomStatuses();

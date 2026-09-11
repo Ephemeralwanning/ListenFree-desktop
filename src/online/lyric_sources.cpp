@@ -32,18 +32,48 @@ QNetworkReply* request(QNetworkAccessManager& network,const QUrl& url,const QJso
 QUrl queryUrl(const QString& base,const QList<QPair<QString,QString>>& params) { QUrl url(base);QUrlQuery query;query.setQueryItems(params);url.setQuery(query);return url; }
 }
 QString lyricSourceName(const QString& source) {
-    return QMap<QString,QString>{{"wy","网易云音乐"},{"tx","QQ 音乐"},{"kg","酷狗音乐"},{"kw","酷我音乐"},{"lrclib","LRCLIB"},{"amll","AMLL 社区"}}.value(source);
+    return QMap<QString,QString>{{"wy","网易云音乐"},{"tx","QQ 音乐"},{"kg","酷狗音乐"},{"kw","酷我音乐"},{"mg","咪咕音乐"},{"lrclib","LRCLIB"},{"amll","AMLL TTML"}}.value(source,source);
 }
 QNetworkReply* lyricSearchRequest(QNetworkAccessManager& network,const QString& source,const QVariantMap& track,const QString& query) {
-    if(source=="wy"||source=="tx"||source=="amll")return platformRequest(network,source=="amll"?"wy":source,"search",query);
-    if(source=="lrclib")return request(network,queryUrl("https://lrclib.net/api/search",{{"q",query}}));
-    if(source=="kg")return request(network,queryUrl("https://lyrics.kugou.com/search",{{"ver","1"},{"man","yes"},{"client","pc"},{"keyword",query},{"duration",track.value("durationMs",0).toString()}}));
-    if(source=="kw")return request(network,queryUrl("https://search.kuwo.cn/r.s",{{"encoding","utf8"},{"rformat","json"},{"client","kt"},{"all",query},{"pn","0"},{"rn","30"},{"ft","music"}}));
+    if(source=="wy"||source=="tx"||source=="mg")return platformRequest(network,source,"search",query);
+    if(source=="amll" || source=="lrclib") {
+        const bool structured = !manualLyricQuery(track,query) && !track.value("title").toString().isEmpty();
+        QList<QPair<QString,QString>> params;
+        if(structured) {
+            params.append({source=="amll"?"musicName":"track_name",track.value("title").toString()});
+            if(normalizedLyricTitle(query)!=normalizedLyricTitle(track.value("title").toString()) && !track.value("artist").toString().isEmpty())
+                params.append({source=="amll"?"artistName":"artist_name",track.value("artist").toString()});
+        } else params.append({"q",query});
+        if(source=="amll")params.emplaceBack("pageSize","30");
+        return request(network,queryUrl(source=="amll"?"https://api.amll.dev/v1/lyrics/search":"https://lrclib.net/api/search",params));
+    }
+    if(source=="kg")return request(network,queryUrl("https://lyrics.kugou.com/search",{{"ver","1"},{"man","yes"},{"client","pc"},{"keyword",query},{"duration",manualLyricQuery(track,query)?QString("0"):track.value("durationMs",0).toString()}}));
+    // The legacy defaults rank partial matches/remixes ahead of the requested
+    // recording. Use the mobile search contract also used by musicdl; include
+    // catalog entries independently of their audio playback availability.
+    if(source=="kw")return request(network,queryUrl("https://search.kuwo.cn/r.s",{{"encoding","utf8"},{"rformat","json"},
+        {"client","kt"},{"all",query},{"pn","0"},{"rn","30"},{"ft","music"},{"vipver","1"},
+        {"cluster","0"},{"strategy","2012"},{"mobi","1"},{"issubtitle","1"},{"show_copyright_off","1"}}));
     return nullptr;
 }
 QVariantList lyricSearchResults(const QString& source,const QByteArray& response) {
     QVariantList rows;
-    if(source=="wy"||source=="tx"||source=="amll")rows=platformSongs(source=="amll"?"wy":source,platformJson(response));
+    if(source=="wy"||source=="tx"||source=="mg")rows=platformSongs(source,platformJson(response));
+    else if(source=="amll") {
+        const auto object=platformJson(response);
+        if(object.value("status").toInt()!=200)return {};
+        for(const auto& item:object.value("data").toObject().value("items").toArray()) {
+            const auto value=item.toObject();
+            const auto strings=[&](const char* key) { QStringList result;for(const auto& text:value.value(key).toArray())if(text.isString())result.append(text.toString());return result; };
+            const auto titles=strings("musicNames");
+            if(titles.isEmpty() || !value.contains("id"))continue;
+            const auto filename=value.value("filename").toString();
+            rows.append(QVariantMap{{"rid",value.value("id").toVariant().toString()},{"title",titles.first()},
+                {"titleAliases",titles},{"artist",strings("artistNames").join(" / ")},{"album",strings("albumNames").join(" / ")},
+                {"creator",strings("authorUsernames").join(" / ")},{"filename",filename},
+                {"sourceUrl","https://github.com/amll-dev/amll-ttml-db/blob/main/raw-lyrics/"+QString::fromLatin1(QUrl::toPercentEncoding(filename))}});
+        }
+    }
     else {
         const auto object=platformJson(response);
         const auto array=source=="lrclib"?QJsonDocument::fromJson(response).array():object.value(source=="kg"?"candidates":"abslist").toArray();
@@ -67,7 +97,6 @@ QVariantList lyricSearchResults(const QString& source,const QByteArray& response
     }
     for(auto& item:rows) {
         auto row=item.toMap();row["lyricSource"]=source;row["sourceLabel"]=lyricSourceName(source);
-        if(source=="amll")row["sourceUrl"]="https://github.com/amll-dev/amll-ttml-db/blob/main/ncm-lyrics/"+row.value("rid").toString()+".ttml";
         item=row;
     }
     return rows;
@@ -76,7 +105,13 @@ QNetworkReply* lyricFetchRequest(QNetworkAccessManager& network,const QString& s
     const auto id=candidate.value("rid").toString();
     if(source=="wy")return platformRequest(network,"wy","lyrics",id);
     if(source=="amll" && QRegularExpression("^[0-9]+$").match(id).hasMatch())
-        return request(network,QUrl("https://raw.githubusercontent.com/amll-dev/amll-ttml-db/refs/heads/main/ncm-lyrics/"+id+".ttml"));
+        return request(network,queryUrl("https://api.amll.dev/v1/lyrics/get",{{"id",id}}));
+    if(source=="mg") {
+        auto url=QUrl(candidate.value("lrcUrl").toString());
+        if(url.scheme()=="http")url.setScheme("https");
+        if(url.scheme()=="https" && (url.host()=="migu.cn" || url.host().endsWith(".migu.cn")))return request(network,url);
+        return nullptr;
+    }
     if(source=="kg")return request(network,queryUrl("https://lyrics.kugou.com/download",{{"ver","1"},{"client","pc"},{"id",id},{"accesskey",candidate.value("accesskey").toString()},{"fmt","krc"},{"charset","utf8"}}));
     if(source=="kw") {
         const auto data=kuwoXor("user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_"+id.toLatin1()+"&lrcx=1").toBase64();
@@ -222,7 +257,14 @@ QString ttmlLyricBundle(const QByteArray& bytes) {
 QString lyricResponse(const QString& source,const QByteArray& response) {
     if(source=="wy")return matchedLyricBundle(platformJson(response));
     if(source=="kw")return decodeKuwoLyrics(response);
-    if(source=="amll")return ttmlLyricBundle(response);
+    if(source=="amll") {
+        if(response.trimmed().startsWith('<'))return ttmlLyricBundle(response);
+        return ttmlLyricBundle(platformJson(response).value("data").toObject().value("lyrics").toString().toUtf8());
+    }
+    if(source=="mg") {
+        const auto text=QString::fromUtf8(response);
+        return parseTimedLyrics(text).isEmpty()?QString{}:text;
+    }
     if(source=="kg") {
         const auto object=platformJson(response);const auto data=QByteArray::fromBase64(object.value("content").toString().toLatin1());
         return object.value("contenttype").toInt()==2?QString::fromUtf8(data):krcLyricBundle(data);

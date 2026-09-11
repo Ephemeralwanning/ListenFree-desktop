@@ -11,6 +11,7 @@
 #include <atomic>
 
 namespace listenfree {
+class WindowsMediaSession;
 class PlatformSettings final : public QObject {
   Q_OBJECT
 public:
@@ -40,6 +41,8 @@ private:
   QMenu menu_;
   QMediaDevices devices_;
   QTimer status_;
+  QTimer mediaUpdate_;
+  WindowsMediaSession* mediaSession_{};
   QNetworkAccessManager network_;
   bool checkingUpdates_{false};
   bool transparencyActive_{false};
@@ -51,5 +54,6 @@ private:
   void applyTransparency();
   void updateTray();
   void updateStatus();
+  void updateMediaSession();
 };
 } // namespace listenfree

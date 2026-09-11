@@ -32,7 +32,7 @@ LibraryDirectoryWatcher::~LibraryDirectoryWatcher() {
 bool LibraryDirectoryWatcher::contains(const QString& path) const {
     for (const auto& root : roots_)
         if (path.compare(root, Qt::CaseInsensitive) == 0 ||
-            path.startsWith(root + '/', Qt::CaseInsensitive)) return true;
+            path.startsWith(root.endsWith('/') ? root : root + '/', Qt::CaseInsensitive)) return true;
     return false;
 }
 
@@ -107,10 +107,16 @@ void LibraryDirectoryWatcher::inspect() {
                     leaf.files.insert(info.absoluteFilePath(), {info.size(), info.lastModified().toMSecsSinceEpoch()});
                 }
                 QDirIterator children(directory, QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+                QSet<QString> presentChildren;
                 while (children.hasNext() && !cancelled->load()) {
                     const auto child = children.next();
+                    presentChildren.insert(child);
                     if (!known.contains(child)) queue.append(child);
                 }
+                // A parent notification can be the only surviving event when
+                // a whole subtree is removed and its own watch is dropped.
+                for(const auto& child:known)
+                    if(QFileInfo(child).absolutePath()==directory && !presentChildren.contains(child))queue.append(child);
             }
             result.leaves.insert(directory, std::move(leaf));
         }
@@ -130,6 +136,7 @@ void LibraryDirectoryWatcher::applySnapshot() {
         for (auto it = snapshot.leaves.cbegin(); it != snapshot.leaves.cend(); ++it) {
             if (!contains(it.key())) continue;
             if (!it->exists) {
+                ready.append(it.key());
                 for (auto known = knownDirectories_.begin(); known != knownDirectories_.end();) {
                     if (*known == it.key() || known->startsWith(it.key() + '/')) {
                         observed_.remove(*known);

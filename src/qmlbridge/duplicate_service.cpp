@@ -32,7 +32,8 @@ bool signature(const QVariantMap& item) {
 DuplicateService::DuplicateService(const QString& path,LibraryController& library,QObject* parent)
     :QObject(parent),databasePath_(path),library_(library) {
     connect(&work_,&QFutureWatcher<QVariantMap>::finished,this,[this] {
-        const auto result=work_.result(); busy_=false;library_.endMaintenance();
+        auto future=work_.future();
+        const auto result=future.takeResult(); busy_=false;library_.endMaintenance();
         if(merging_) {
             groups_.clear(); emit merged(result.value("redirects").toList());
             report_=tr("已合并 %1 个文件。\n%2").arg(result.value("redirects").toList().size()).arg(result.value("errors").toStringList().join('\n'));

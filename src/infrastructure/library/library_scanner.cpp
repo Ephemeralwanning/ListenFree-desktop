@@ -122,6 +122,7 @@ void LibraryScanner::start(const QStringList& roots,
                     if (seen.contains(key)) continue;
                     seen.insert(key);
                     const auto knownFile = known.constFind(key);
+                    if(knownFile != known.cend() && knownFile->excluded)continue;
                     if (knownFile != known.cend() &&
                         knownFile->sizeBytes == static_cast<quint64>(file.size()) &&
                         knownFile->modifiedMs == file.lastModified().toMSecsSinceEpoch()) {

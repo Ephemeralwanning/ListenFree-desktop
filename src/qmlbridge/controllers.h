@@ -74,6 +74,7 @@ public:
     Q_INVOKABLE void cancel();
     void setAutoWatchEnabled(bool enabled);
     void notifyFileCompleted(const QString& path);
+    void refreshTotalCount();
     void reloadRoots();
     bool beginMaintenance();
     void endMaintenance();
@@ -95,7 +96,6 @@ private:
     void applyFinish(std::uint64_t generation, const application::ScanOutcome& outcome);
     void setLastError(QString error);
     void refreshRoots();
-    void refreshTotalCount();
     void beginScan(const QStringList& roots, bool recursive);
     void cancelActiveScan();
     void scanPendingDirectories();
@@ -115,6 +115,8 @@ private:
     quint64 totalCount_{0};
     QString lastError_;
     QStringList roots_;
+    QStringList activeScanRoots_;
+    bool activeScanRecursive_{true};
     bool scanning_{false};
     infrastructure::library::LibraryDirectoryWatcher directoryWatcher_;
     QSet<QString> pendingDirectories_;

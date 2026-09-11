@@ -64,6 +64,7 @@ public:
     QString translation()const;QString shotName()const;
     FoliaPose pose(const QVariantMap& node) const;
     Q_INVOKABLE QVariantMap inspectPose(int line,int glyph) const;
+    Q_INVOKABLE QVariantMap inspectCamera() const;
 signals:
     void lyricsChanged();void styleChanged();void frameChanged();void currentChanged();void compositionChanged();void placementsChanged();void accentColorChanged();
 protected: void geometryChange(const QRectF& now,const QRectF& old) override;
@@ -74,6 +75,10 @@ private:
     void compile();void rebuildWindow();qreal cameraIndex()const;qreal progress(int line)const;
     QVariantMap nodeFor(int line,int glyph,int kind=0)const;
     FoliaPose dioramaPose(const QVariantMap& node)const;
+    void updateDioramaCamera();
+    qreal dioramaUnit(const Line& line)const;
+    struct Camera {QVector3D eye,right,down,forward;QMatrix4x4 view;qreal focal=1,distance=5.2;bool valid=false;} camera_;
+    unsigned geometryRevision_=0;
     QVariantList lyrics_;QVector<Line> lines_;FoliaNodeModel model_;
     QVariantMap composition_;
     QVariantList placements_;

@@ -1,22 +1,28 @@
 [CmdletBinding()]
 param(
     [string]$SourceRoot='',
-    [string]$Version='0.3.1',
+    [string]$Version='0.3.2',
     [string]$OutputDirectory='',
+    [string]$RuntimeDirectory='',
     [string]$InnoCompiler='C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-    [string]$SevenZip='C:\Program Files\7-Zip\7z.exe'
+    [string]$SevenZip='C:\Program Files\7-Zip\7z.exe',
+    [switch]$PortableOnly,
+    [switch]$SkipChecksums
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if (!$SourceRoot) { $SourceRoot=(Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Invalid release version' }
 $source=[IO.Path]::GetFullPath($SourceRoot)
-$runtime=Join-Path $source 'dist\ListenFree-Portable'
+$runtime=if($RuntimeDirectory){[IO.Path]::GetFullPath($RuntimeDirectory)}else{Join-Path $source 'dist\ListenFree-Portable'}
+if (!(Test-Path -LiteralPath (Join-Path $runtime 'qt.conf'))) { throw "Missing deployed runtime: $runtime" }
 $releaseRoot=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $source "dist\releases\$Version"}
 $stage=Join-Path $releaseRoot "ListenFree-$Version-windows-x64"
 # A fresh directory prevents an earlier smoke test's data from entering a ZIP.
 if (Test-Path -LiteralPath $stage) { throw "Release stage already exists: $stage" }
-foreach ($required in $InnoCompiler,$SevenZip,(Join-Path $source 'build\portable\listenfree.exe'),(Join-Path $source 'packaging\usage.txt')) {
+$requiredInputs=@($SevenZip,(Join-Path $source 'build\portable\listenfree.exe'),(Join-Path $source 'build\portable\listenfree-sourcehost.exe'),(Join-Path $source 'packaging\usage.txt'))
+if (!$PortableOnly) { $requiredInputs += $InnoCompiler }
+foreach ($required in $requiredInputs) {
     if (!(Test-Path -LiteralPath $required)) { throw "Missing release input: $required" }
 }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -41,6 +47,8 @@ foreach ($pair in @(@('.vcpkg_installed\x64-mingw-dynamic\share','qjs'),@('.vcpk
 }
 Copy-Item -LiteralPath (Join-Path $source 'licenses\THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $stage 'licenses\THIRD-PARTY-NOTICES.txt') -Force
 Copy-Item -LiteralPath (Join-Path $source 'packaging\usage.txt') -Destination (Join-Path $stage '使用说明.txt')
+$releaseNotes=Join-Path $source "packaging\release-notes-$Version.txt"
+if (Test-Path -LiteralPath $releaseNotes) { Copy-Item -LiteralPath $releaseNotes -Destination (Join-Path $stage '更新说明.txt') }
 New-Item -ItemType File -Path (Join-Path $stage 'portable.mode') | Out-Null
 foreach ($file in Get-ChildItem -LiteralPath $stage -File -Recurse) {
     $relative=$file.FullName.Substring($stage.Length+1)
@@ -50,14 +58,18 @@ foreach ($file in Get-ChildItem -LiteralPath $stage -File -Recurse) {
 }
 $smokeData=Join-Path $source "build\release-smoke-$Version"
 & (Join-Path $PSScriptRoot 'test-portable-startup.ps1') -PackageRoot $stage -DataDirectory $smokeData
-& $InnoCompiler "/DStageDir=$stage" "/DOutputDir=$releaseRoot" "/DReleaseVersion=$Version" (Join-Path $PSScriptRoot 'listenfree.iss')
-if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+if (!$PortableOnly) {
+    & $InnoCompiler "/DStageDir=$stage" "/DOutputDir=$releaseRoot" "/DReleaseVersion=$Version" (Join-Path $PSScriptRoot 'listenfree.iss')
+    if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+}
 $zip=Join-Path $releaseRoot "ListenFree-$Version-windows-x64-Portable.zip"
 & $SevenZip a -tzip -mx=7 $zip $stage
 if ($LASTEXITCODE -ne 0) { throw 'Portable archive creation failed' }
 & $SevenZip t $zip
 if ($LASTEXITCODE -ne 0) { throw 'Portable archive integrity check failed' }
-$artifacts=Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object Extension -In '.exe','.zip'
-$checksums=foreach ($file in $artifacts) { "{0}  {1}" -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$file.Name }
-[IO.File]::WriteAllLines((Join-Path $releaseRoot 'SHA256SUMS.txt'),$checksums,[Text.UTF8Encoding]::new($false))
+if (!$SkipChecksums) {
+    $artifacts=Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object Extension -In '.exe','.zip'
+    $checksums=foreach ($file in $artifacts) { "{0}  {1}" -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$file.Name }
+    [IO.File]::WriteAllLines((Join-Path $releaseRoot 'SHA256SUMS.txt'),$checksums,[Text.UTF8Encoding]::new($false))
+}
 Write-Output "发布包：$releaseRoot"

@@ -1,6 +1,7 @@
 #include "qmlbridge/immersive_controller.h"
 #include "qmlbridge/fume_layout.h"
 #include "qmlbridge/folia_scene.h"
+#include "qmlbridge/diorama_geometry.h"
 #include <QApplication>
 #include <QTest>
 #include <QElapsedTimer>
@@ -9,11 +10,31 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QQuickView>
+#include <QQuickItem>
+#include <QQmlEngine>
+#include <QDir>
+#include <QFile>
+#include <QFontDatabase>
 #include <qmmp/visual.h>
 #include <cmath>
 using listenfree::qmlbridge::ImmersiveController;
 class ImmersiveTests : public QObject {
     Q_OBJECT
+    static QVariantList typographyLines() {
+        const QStringList text={QStringLiteral("海风翻过山脊"),QStringLiteral("把远方写进窗里的光"),QStringLiteral("一封还没寄出的信"),
+            QStringLiteral("云慢慢经过"),QStringLiteral("城市在雨声里醒来"),QStringLiteral("让这一刻停留"),
+            QStringLiteral("沿着河岸寻找春天"),QStringLiteral("灯火落在水面"),QStringLiteral("听见脚步轻轻回响"),
+            QStringLiteral("当夜色渐渐散去"),QStringLiteral("仍有星光"),QStringLiteral("走过长长的街道"),
+            QStringLiteral("把每一阵微风收藏"),QStringLiteral("你从人海之中走来"),QStringLiteral("抬头看见新的天空"),
+            QStringLiteral("风的方向"),QStringLiteral("窗外的树影缓缓摇晃"),QStringLiteral("我们在这里相遇"),
+            QStringLiteral("时光留下温柔的痕迹"),QStringLiteral("雨停以后"),QStringLiteral("把故事留给明天"),
+            QStringLiteral("远处亮起一盏灯"),QStringLiteral("在星河之下"),QStringLiteral("继续向前")};
+        QVariantList result;
+        for(int i=0;i<text.size();++i)result.append(QVariantMap{{"text",text[i]},{"timeMs",i*5000},
+            {"words",QVariantList{QVariantMap{{"text",text[i]},{"startMs",i*5000},{"endMs",i*5000+4000}}}}});
+        return result;
+    }
 private slots:
     void nativeMvKeepsFramesBoundedAndSeeksInBothDirections() {
         const auto fixture=qEnvironmentVariable("LISTENFREE_TEST_NATIVE_MV");
@@ -107,6 +128,94 @@ private slots:
         scene.setPosition(2250);QVERIFY(scene.inspectPose(0,1)["ghost"].toDouble()>0.);
         scene.setReducedMotion(true);QCOMPARE(scene.inspectPose(0,1)["ghost"].toDouble(),0.);
     }
+    void dioramaCameraIsContinuousIndependentAndSeekable() {
+        FoliaScene scene;scene.setWidth(1280);scene.setHeight(800);scene.setSeed("diorama-stage");scene.setStyle("diorama");scene.setLyrics(typographyLines());
+        for(int i=1;i<24;++i){
+            scene.setPosition(i*5000-.1);const auto before=scene.inspectCamera();
+            scene.setPosition(i*5000+.1);const auto after=scene.inspectCamera();
+            QVERIFY((before["eye"].value<QVector3D>()-after["eye"].value<QVector3D>()).length()<.002);
+            QVERIFY((before["forward"].value<QVector3D>()-after["forward"].value<QVector3D>()).length()<.002);
+        }
+        scene.setPosition(32300);const auto camera=scene.inspectCamera();const auto pose=scene.inspectPose(6,2);
+        scene.setEnergy(1.);QCOMPARE(scene.inspectCamera(),camera);QCOMPARE(scene.inspectPose(6,2),pose);
+        scene.setPosition(114000);scene.setPosition(32300);QCOMPARE(scene.inspectCamera(),camera);QCOMPARE(scene.inspectPose(6,2),pose);
+        scene.setPosition(32300);QCOMPARE(scene.inspectCamera(),camera);
+        scene.setReducedMotion(true);scene.setPosition(31000);const auto still=scene.inspectCamera();
+        scene.setPosition(34000);QCOMPARE(scene.inspectCamera(),still);
+        for(const QSize size:{QSize(1280,800),QSize(700,950)}){
+            scene.setWidth(size.width());scene.setHeight(size.height());scene.setReducedMotion(false);
+            for(int i=0;i<24;++i)for(int time:{1600,3000,4600}){
+                scene.setPosition(i*5000+time);const auto camera=scene.inspectCamera();
+                const auto right=camera["right"].value<QVector3D>(),down=camera["down"].value<QVector3D>(),forward=camera["forward"].value<QVector3D>();
+                QVERIFY(std::abs(QVector3D::dotProduct(right,down))<.001);QVERIFY(std::abs(forward.length()-1)<.001);
+                for(int g=0;g<typographyLines()[i].toMap()["text"].toString().size();++g){
+                    const auto p=scene.inspectPose(i,g);QVERIFY(p["alpha"].toDouble()>.1);
+                    QVERIFY2(p["x"].toDouble()>-30&&p["x"].toDouble()<size.width(),qPrintable(QString("line %1 at %2").arg(i).arg(time)));
+                    QVERIFY(p["y"].toDouble()>-40&&p["y"].toDouble()<size.height()*.85);
+                }
+            }
+        }
+    }
+    void dioramaSurfacesStayWeldedAndBounded() {
+        for(int kind=0;kind<4;++kind)for(qreal stretch:{1.,2.8,3.4}){
+            const auto surface=diorama::surface(kind,stretch);QVERIFY(surface.size()>300);QVERIFY(surface.size()<=diorama::pointsPerShape);
+            QCOMPARE(diorama::surface(kind,stretch),surface);
+            for(const auto& point:surface)QVERIFY(std::isfinite(point.length()));
+            if(kind==0){QSet<QString> unique;for(const auto& p:surface)unique.insert(QString("%1/%2/%3").arg(p.x()).arg(p.y()).arg(p.z()));QCOMPARE(unique.size(),surface.size());}
+        }
+        for(int shot=0;shot<13;++shot){const auto shapes=diorama::formation(shot,71231,3.25);QVERIFY(shapes.size()>=4&&shapes.size()<=7);
+            for(const auto& shape:shapes){QVERIFY(shape.center.z()>=.5);QVERIFY(std::hypot(shape.center.x(),shape.center.y())>3.);}}
+    }
+    void dioramaGpuBuffersStayBoundedDuringPlayback() {
+        class Probe:public FoliaDecorItem {public:using FoliaDecorItem::updatePaintNode;};
+        FoliaScene scene;scene.setWidth(1280);scene.setHeight(800);scene.setStyle("diorama");scene.setSeed("buffer-budget");
+        QVariantList lines;for(int i=0;i<300;++i)lines.append(QVariantMap{{"text",QStringLiteral("听见远方的回响")},{"timeMs",i*5000}});
+        scene.setLyrics(lines);scene.setPosition(50300);Probe decor;decor.setWidth(1280);decor.setHeight(800);decor.setScene(&scene);
+        auto* root=decor.updatePaintNode(nullptr,nullptr);auto* node=dynamic_cast<diorama::Node*>(root);QVERIFY(node);
+        const void* data=node->geometry()->vertexData();
+        for(int ms=50316;ms<50800;ms+=16){scene.setPosition(ms);QCOMPARE(decor.updatePaintNode(root,nullptr),root);QCOMPARE(node->geometry()->vertexData(),data);}
+        qsizetype maxBytes=0;
+        for(int index:{0,12,125,240,299,2,125}){
+            scene.setPosition(index*5000+1300);QCOMPARE(decor.updatePaintNode(root,nullptr),root);
+            const auto* geometry=node->geometry();const qsizetype bytes=geometry->vertexCount()*sizeof(diorama::Vertex)+geometry->indexCount()*sizeof(unsigned);
+            maxBytes=std::max(maxBytes,bytes);QVERIFY(bytes<5*1024*1024);QVERIFY(node->last-node->first<=6);
+        }
+        qInfo()<<"Maximum resident particle vertex/index bytes:"<<maxBytes;
+        scene.setStyle("sonnet");root=decor.updatePaintNode(root,nullptr);QVERIFY(!dynamic_cast<diorama::Node*>(root));
+        scene.setStyle("diorama");root=decor.updatePaintNode(root,nullptr);QVERIFY(dynamic_cast<diorama::Node*>(root));delete root;
+    }
+    void dioramaNativeGpuRendering() {
+        if(!qEnvironmentVariableIsSet("LISTENFREE_DIORAMA_RENDER"))QSKIP("Opt-in native GPU stage render check");
+        const auto source=QFINDTESTDATA("../music_player_desktop/components/FoliaLyrics.qml");QVERIFY(!source.isEmpty());
+        QTemporaryDir directory;QVERIFY(directory.isValid());const QDir components=QFileInfo(source).dir();
+        for(const auto& name:components.entryList({"*.qml","*.js"},QDir::Files))QVERIFY(QFile::copy(components.filePath(name),directory.filePath(name)));
+        {QFile file(directory.filePath("qmldir"));QVERIFY(file.open(QIODevice::WriteOnly));file.write("singleton AppTheme 1.0 AppTheme.qml\n");}
+        qmlRegisterType<FoliaScene>("ListenFree.Native",1,0,"FoliaScene");qmlRegisterType<FoliaNodeItem>("ListenFree.Native",1,0,"FoliaNodeItem");qmlRegisterType<FoliaDecorItem>("ListenFree.Native",1,0,"FoliaDecor");
+        QQuickView view;view.setColor(QColor("#23171e"));view.setResizeMode(QQuickView::SizeRootObjectToView);view.resize(1280,800);
+        view.setSource(QUrl::fromLocalFile(directory.filePath("FoliaLyrics.qml")));
+        QVERIFY2(view.status()==QQuickView::Ready,qPrintable(view.errors().isEmpty()?QString{}:view.errors().first().toString()));
+        auto* root=view.rootObject();QVERIFY(root);root->setProperty("style","diorama");root->setProperty("title","diorama-stage");root->setProperty("lyrics",typographyLines());
+        root->setProperty("energy",.65);view.show();QTest::qWait(150);
+        auto* scene=root->findChild<FoliaScene*>();QVERIFY(scene);scene->setAccentColor(QColor("#f45f7b"));
+        const auto report=qEnvironmentVariable("LISTENFREE_DIORAMA_RENDER");QVERIFY(QDir().mkpath(report));
+        int changed=0;QImage last;
+        for(int index:{0,1,3,7,10,13}){
+            root->setProperty("positionMs",index*5000+2800.);view.requestUpdate();QTest::qWait(100);
+            const auto image=view.grabWindow();QVERIFY(!image.isNull());QVERIFY(image.save(QDir(report).filePath(QString("stage-%1.png").arg(index))));
+            int decorPixels=0;for(int y=20;y<image.height()-20;y+=2)for(int x=20;x<image.width()-20;x+=2){
+                if(x>image.width()*.30&&x<image.width()*.70&&y>image.height()*.28&&y<image.height()*.66)continue;
+                const auto color=image.pixelColor(x,y);if(color.red()>90&&color.red()>color.green()*1.12)++decorPixels;
+            }
+            QVERIFY2(decorPixels>180,qPrintable(QString("GPU scenery pixels: %1").arg(decorPixels)));
+            if(!last.isNull()&&image!=last)++changed;
+            last=image;
+        }
+        QCOMPARE(changed,5);view.resize(700,950);root->setProperty("positionMs",52800.);QTest::qWait(100);
+        QVERIFY(view.grabWindow().save(QDir(report).filePath("portrait.png")));
+        // Exercise the custom-node/material lifetime when changing styles.
+        for(const auto& style:{"claddagh","diorama","sonnet","diorama"}){root->setProperty("style",style);QTest::qWait(30);}
+        QVERIFY(!view.grabWindow().isNull());
+    }
     void fumeLayoutDeterministicTimedAndNonOverlapping() {
         FumeLayout first, second;
         QVariantList lines;
@@ -129,6 +238,95 @@ private slots:
             }
         }
         QVERIFY(heroes>0);second.setSeed("different-song");QVERIFY(first.blocks()!=second.blocks());
+    }
+    void fumeMixedDirectionsPreserveGlyphsAndTypeHierarchy() {
+        FumeLayout layout;layout.setSeed("typography");layout.setLyrics(typographyLines());
+        int vertical=0,horizontal=0;int smallest=1000,largest=0;
+        for(const auto& value:layout.blocks()) {
+            const auto block=value.toMap();const auto glyphs=block["glyphs"].toList();
+            smallest=std::min(smallest,block["fontSize"].toInt());largest=std::max(largest,block["fontSize"].toInt());
+            QString reconstructed;qreal previous=block["start"].toDouble();
+            for(const auto& item:glyphs) {
+                const auto glyph=item.toMap();reconstructed+=glyph["sourceText"].toString();
+                QVERIFY(glyph["start"].toDouble()>=previous);QVERIFY(glyph["end"].toDouble()>=glyph["start"].toDouble());
+                QVERIFY(glyph["x"].toDouble()>=0 && glyph["y"].toDouble()>=0);
+                QVERIFY(glyph["x"].toDouble()+glyph["width"].toDouble()<=block["contentWidth"].toDouble()+1);
+                QVERIFY(glyph["y"].toDouble()+glyph["height"].toDouble()<=block["contentHeight"].toDouble()+1);
+                previous=glyph["start"].toDouble();
+            }
+            QCOMPARE(reconstructed,block["text"].toString());
+            if(block["orientation"]=="vertical") {
+                ++vertical;QVERIFY(glyphs.size()>=3);
+                QCOMPARE(glyphs[0].toMap()["x"],glyphs[1].toMap()["x"]);
+                QVERIFY(glyphs[1].toMap()["y"].toDouble()>glyphs[0].toMap()["y"].toDouble());
+                const auto runs=block["runs"].toList();
+                if(runs.size()>1)QVERIFY(runs[0].toMap()["x"].toDouble()>runs[1].toMap()["x"].toDouble());
+            } else ++horizontal;
+        }
+        QVERIFY(vertical>=4);QVERIFY(horizontal>=12);QVERIFY(largest>=smallest*2.5);
+        QVariantList english;
+        for(int i=0;i<20;++i)english.append(QVariantMap{{"text",QString("A light beyond the window %1").arg(i)},{"timeMs",i*4000}});
+        layout.setLyrics(english);int sideways=0;
+        for(const auto& value:layout.blocks()) {
+            const auto block=value.toMap();
+            if(block["orientation"]=="sideways") {
+                ++sideways;QCOMPARE(block["rotation"].toInt(),90);
+                QCOMPARE(block["width"],block["contentHeight"]);QCOMPARE(block["height"],block["contentWidth"]);
+            }
+        }
+        QVERIFY(sideways>=3);
+        layout.setLyrics({QVariantMap{{"text",QStringLiteral("风👨‍👩‍👧‍👦光")},{"timeMs",0}}});
+        QVERIFY(layout.block(0)["hero"].toBool());QCOMPARE(layout.block(0)["glyphs"].toList().size(),3);
+    }
+    void fumeCameraAndNativeTextRendering() {
+        if(!qEnvironmentVariableIsSet("LISTENFREE_FUME_RENDER"))QSKIP("Opt-in native QML typography render check");
+        const auto source=QFINDTESTDATA("../music_player_desktop/components/FumeLyrics.qml");QVERIFY(!source.isEmpty());
+        QTemporaryDir directory;QVERIFY(directory.isValid());
+        QVERIFY(QFile::copy(source,directory.filePath("FumeLyrics.qml")));
+        QVERIFY(QFile::copy(QFileInfo(source).dir().filePath("AppTheme.qml"),directory.filePath("AppTheme.qml")));
+        { QFile file(directory.filePath("qmldir"));QVERIFY(file.open(QIODevice::WriteOnly));file.write("singleton AppTheme 1.0 AppTheme.qml\n"); }
+        qmlRegisterType<FumeLayout>("ListenFree.Native",1,0,"FumeLayout");
+        QQuickView view;view.setColor(QColor("#101820"));view.setResizeMode(QQuickView::SizeRootObjectToView);view.resize(1280,800);
+        view.setSource(QUrl::fromLocalFile(directory.filePath("FumeLyrics.qml")));
+        QVERIFY2(view.status()==QQuickView::Ready,qPrintable(view.errors().isEmpty()?QString{}:view.errors().first().toString()));
+        auto* scene=view.rootObject();QVERIFY(scene);
+        scene->setProperty("reducedMotion",true);scene->setProperty("holdRatio",1.);scene->setProperty("seed","typography");
+        scene->setProperty("lyrics",typographyLines());view.show();
+        auto* layout=scene->findChild<FumeLayout*>();QVERIFY(layout);QCOMPARE(layout->blocks().size(),24);
+        const auto report=qEnvironmentVariable("LISTENFREE_FUME_RENDER");QVERIFY(QDir().mkpath(report));
+        const auto capture=[&](const QString& name) {view.requestUpdate();QTest::qWait(80);return view.grabWindow().save(QDir(report).filePath(name+".png"));};
+        QVariantMap hero,body,vertical;
+        QRectF world;
+        for(const auto& value:layout->blocks()) {
+            const auto block=value.toMap();world=world.united(QRectF(block["x"].toDouble(),block["y"].toDouble(),block["width"].toDouble(),block["height"].toDouble()));
+            if(block["orientation"]=="vertical" && vertical.isEmpty())vertical=block;
+            if(block["orientation"]!="horizontal")continue;
+            if(block["hero"].toBool() && block["fontSize"].toInt()>hero["fontSize"].toInt())hero=block;
+            if(!block["hero"].toBool() && (body.isEmpty() || block["fontSize"].toInt()<body["fontSize"].toInt()))body=block;
+        }
+        QVERIFY(!hero.isEmpty() && !body.isEmpty() && !vertical.isEmpty());
+        const auto focus=[&](const QVariantMap& block) {
+            scene->setProperty("positionMs",block["start"].toDouble()+2100);QTest::qWait(30);
+            return block["fontSize"].toDouble()*scene->property("targetScale").toDouble();
+        };
+        const auto heroSize=focus(hero);QVERIFY(capture("hero"));const auto bodySize=focus(body);QVERIFY(capture("body"));
+        QVERIFY2(heroSize>bodySize*1.8,qPrintable(QString("hero=%1 body=%2").arg(heroSize).arg(bodySize)));
+        focus(vertical);QVERIFY(capture("vertical"));
+        QCOMPARE(scene->property("lineIndex").toInt(),vertical["index"].toInt());
+        QVERIFY(std::abs(scene->property("cameraX").toDouble()-scene->property("targetX").toDouble())<1);
+        int loaded=0;QList<QQuickItem*> pending{scene};
+        while(!pending.isEmpty()) {
+            auto* child=pending.takeLast();pending.append(child->childItems());
+            if(child->objectName().startsWith("fumeBlock-") && child->property("active").toBool())++loaded;
+        }
+        QVERIFY(loaded>0 && loaded<layout->blocks().size());
+        view.resize(700,950);QTest::qWait(50);
+        QVERIFY(vertical["width"].toDouble()*scene->property("cameraScale").toDouble()<=view.width()*.85);
+        QVERIFY(vertical["height"].toDouble()*scene->property("cameraScale").toDouble()<=view.height()*.73);
+        QVERIFY(capture("vertical-portrait"));
+        view.resize(1280,800);QTest::qWait(50);scene->setProperty("positionMs",60000.);QTest::qWait(30);
+        scene->setProperty("cameraX",world.center().x());scene->setProperty("cameraY",world.center().y());
+        scene->setProperty("cameraScale",std::min(1160/world.width(),700/world.height()));QVERIFY(capture("overview"));
     }
     void biliSearchResolveAndVideoFrame() {
         if(!qEnvironmentVariableIsSet("LISTENFREE_TEST_ONLINE_MV"))QSKIP("Opt-in live Bilibili check");
@@ -239,5 +437,14 @@ private slots:
         service.setActive(false); QVERIFY(!service.videoPlayer()); QVERIFY(!service.videoReady());
     }
 };
-int main(int argc,char** argv) {QApplication app(argc,argv);ImmersiveTests tests;return QTest::qExec(&tests,argc,argv);}
+int main(int argc,char** argv) {
+    QApplication app(argc,argv);
+#ifdef Q_OS_WIN
+    // The offscreen QPA does not enumerate Windows fonts. Use the same system
+    // family as the desktop app so layout/render checks cannot pass with tofu.
+    if(QGuiApplication::platformName()=="offscreen")for(const auto& name:{"msyh.ttc","msyhbd.ttc","seguiemj.ttf"})
+        QFontDatabase::addApplicationFont(QDir(qEnvironmentVariable("WINDIR")).filePath(QString("Fonts/")+name));
+#endif
+    ImmersiveTests tests;return QTest::qExec(&tests,argc,argv);
+}
 #include "immersive_tests.moc"

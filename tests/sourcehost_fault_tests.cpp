@@ -8,6 +8,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QThread>
 
 #include <cstdlib>
 #include <utility>
@@ -130,6 +131,11 @@ private slots:
     void cleanup() { clearFaultMode(); qunsetenv("LISTENFREE_CHILD_PID_FILE"); }
 
     void startupHandshakeRequest();
+    void slowStartupRemainsReady();
+    void handshakeFailureRetriesAndRecovers();
+    void handshakeRetriesAreBounded();
+    void silentHostTimesOut();
+    void busyParentAcceptsBufferedHandshake();
     void failedAndMalformedStartup();
     void cancellationAndTimeoutAreExactlyOnce();
     void writeFailureIsTerminal();
@@ -167,9 +173,10 @@ void SourceHostFaultTests::failedAndMalformedStartup() {
         QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
         QVERIFY(errors.count() > 0);
     }
-    for (const QString& fault : {QStringLiteral("bad-handshake"), QStringLiteral("delay-handshake")}) {
+    for (const QString& fault : {QStringLiteral("bad-handshake")}) {
         setFaultMode(fault);
         SourceHostClient client(faultHostPath());
+        client.setAutoRestart(false);
         QSignalSpy errors(&client, &SourceHostClient::protocolError);
         QVERIFY(client.start());
         QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2500);
@@ -216,6 +223,65 @@ void SourceHostFaultTests::writeFailureIsTerminal() {
     QCOMPARE(finished.count(), 1);
     client.stop();
     QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 2000);
+}
+
+void SourceHostFaultTests::slowStartupRemainsReady() {
+    setFaultMode(QStringLiteral("delay-handshake"));
+    SourceHostClient client(faultHostPath());
+    QSignalSpy ready(&client, &SourceHostClient::ready);
+    QSignalSpy errors(&client, &SourceHostClient::protocolError);
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 4000);
+    QCOMPARE(client.state(), SourceHostClient::HostState::Ready);
+    QCOMPARE(errors.count(), 0);
+}
+
+void SourceHostFaultTests::handshakeFailureRetriesAndRecovers() {
+    setFaultMode(QStringLiteral("bad-handshake"));
+    SourceHostClient client(faultHostPath());
+    QSignalSpy ready(&client, &SourceHostClient::ready);
+    QSignalSpy restarted(&client, &SourceHostClient::restarted);
+    connect(&client, &SourceHostClient::protocolError, &client, [](const QString& error) {
+        if (error == QStringLiteral("invalid-sourcehost-handshake"))
+            setFaultMode(QStringLiteral("normal"));
+    });
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 4000);
+    QCOMPARE(restarted.count(), 1);
+}
+
+void SourceHostFaultTests::handshakeRetriesAreBounded() {
+    setFaultMode(QStringLiteral("bad-handshake"));
+    SourceHostClient client(faultHostPath());
+    QSignalSpy crashed(&client, &SourceHostClient::crashed);
+    QVERIFY(client.start());
+    QTRY_COMPARE_WITH_TIMEOUT(crashed.count(), 4, 5000);
+    QTRY_COMPARE(client.state(), SourceHostClient::HostState::Stopped);
+    QTest::qWait(500);
+    QCOMPARE(crashed.count(), 4);
+    QVERIFY(!client.running());
+}
+
+void SourceHostFaultTests::silentHostTimesOut() {
+    setFaultMode(QStringLiteral("never-handshake"));
+    SourceHostClient client(faultHostPath());
+    client.setAutoRestart(false);
+    QSignalSpy errors(&client, &SourceHostClient::protocolError);
+    QVERIFY(client.start());
+    QTRY_VERIFY_WITH_TIMEOUT(!client.running(), 8000);
+    QVERIFY(errors.contains({QStringLiteral("sourcehost-handshake-timeout")}));
+}
+
+void SourceHostFaultTests::busyParentAcceptsBufferedHandshake() {
+    setFaultMode(QStringLiteral("delay-handshake"));
+    SourceHostClient client(faultHostPath());
+    QSignalSpy ready(&client, &SourceHostClient::ready);
+    QSignalSpy errors(&client, &SourceHostClient::protocolError);
+    QVERIFY(client.start());
+    QTest::qWait(250); // Send Hello, then simulate a busy GUI during shell startup.
+    QThread::msleep(5500);
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
+    QCOMPARE(errors.count(), 0);
 }
 
 void SourceHostFaultTests::outboundBackpressureIsBounded() {

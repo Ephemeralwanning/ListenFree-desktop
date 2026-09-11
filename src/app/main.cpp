@@ -15,6 +15,8 @@
 #include "qmlbridge/fume_layout.h"
 #include "qmlbridge/folia_scene.h"
 #include "qmlbridge/cover_image_provider.h"
+#include "qmlbridge/remote_artwork_provider.h"
+#include "media/artwork_video.h"
 #include "qmlbridge/background_contrast.h"
 #include "qmlbridge/account_service.h"
 #include "qmlbridge/duplicate_service.h"
@@ -36,6 +38,7 @@
 #include <qmmp/qmmp.h>
 #ifdef Q_OS_WIN
 #include <objbase.h>
+#include "windows_media_session.h"
 #endif
 
 #include <QDir>
@@ -57,9 +60,10 @@ int main(int argc, char* argv[]) {
     app.setWindowIcon(QIcon(":/qt/qml/ListenFree/Bootstrap/music_player_desktop/assets/icons/app.png"));
     app.setApplicationName("ListenFree");
     app.setOrganizationName("ListenFree");
-    app.setApplicationVersion("0.3.1");
+    app.setApplicationVersion("0.3.2");
 #ifdef Q_OS_WIN
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    listenfree::WindowsMediaSession::registerApplicationIdentity("ListenFree.Desktop", "ListenFree");
 #endif
     const QStringList arguments = app.arguments();
     const bool portableSmokeMode = arguments.contains(QStringLiteral("--portable-smoke"));
@@ -132,6 +136,8 @@ int main(int argc, char* argv[]) {
     QObject::connect(&libraryController, &listenfree::qmlbridge::LibraryController::scanningChanged, &controller, [&] {
         if (!libraryController.scanning()) controller.reload();
     });
+    QObject::connect(&controller, &listenfree::qmlbridge::PortableSession::localLibraryChanged,
+                     &libraryController, &listenfree::qmlbridge::LibraryController::refreshTotalCount);
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &controller, [&] { libraryController.cancel(); controller.shutdown(); });
     controller.setDynamicArtworkEnabled(settingsController.value("appearance.dynamicArtworkEnabled", true).toBool());
     controller.setBilibiliSourceEnabled(settingsController.value("account.bilibili.sourceEnabled", false).toBool());
@@ -166,6 +172,10 @@ int main(int argc, char* argv[]) {
     engine.rootContext()->setContextProperty("backendDuplicates",&duplicates);
     engine.rootContext()->setContextProperty("backendShortcuts", &shortcuts);
     engine.addImageProvider("covers", new CoverImageProvider);
+    engine.addImageProvider("artwork", new RemoteArtworkProvider);
+    engine.rootContext()->setContextProperty("backendArtworkTextures", true);
+    auto* artworkVideoFactory = new listenfree::media::ArtworkVideoFactory(&engine);
+    engine.rootContext()->setContextProperty("backendArtworkVideoFactory", artworkVideoFactory);
     BackgroundContrast backgroundContrast;
     engine.rootContext()->setContextProperty("backendBackgroundContrast", &backgroundContrast);
     engine.rootContext()->setContextProperty("backendCatalog", &controller);
@@ -263,6 +273,8 @@ int main(int argc, char* argv[]) {
                     shell->setProperty("queueFromNowPlaying", true);
                     shell->setProperty("queueOpen", true);
                 }
+            } else if (captureView == QStringLiteral("search-input")) {
+                shell->setProperty("currentRoute", QStringLiteral("library/songs"));
             } else if (captureView == QStringLiteral("queue")) {
                 shell->setProperty("queueOpen", true);
             } else if (captureView == QStringLiteral("collapsed-player")) {
@@ -292,7 +304,13 @@ int main(int argc, char* argv[]) {
             }
 
             QTimer::singleShot(520, &app, [shell, captureView] {
-                if (captureView == QStringLiteral("playlist-filter")) {
+                if (captureView == QStringLiteral("search-input")) {
+                    if (auto* input = shell->findChild<QQuickItem*>(QStringLiteral("globalSearchInput"))) {
+                        input->setProperty("text", QStringLiteral("搜索 ListenFree"));
+                        input->forceActiveFocus();
+                        qInfo() << "Search input:" << input->property("color") << "focused:" << input->hasActiveFocus();
+                    }
+                } else if (captureView == QStringLiteral("playlist-filter")) {
                     if (auto* page = shell->findChild<QObject*>(QStringLiteral("playlistPage")))
                         page->setProperty("filterOpen", true);
                 } else if (captureView == QStringLiteral("playlist-share")) {

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$SourceRoot='', [string]$QtRoot='F:\QT\6.11.2\mingw_64', [string]$QtToolsRoot='F:\QT\Tools', [string]$VendorRoot='', [switch]$SkipBuild)
+param([string]$SourceRoot='', [string]$QtRoot='F:\QT\6.11.2\mingw_64', [string]$QtToolsRoot='F:\QT\Tools', [string]$VendorRoot='', [switch]$SkipBuild, [string]$OutputDirectory='')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if (!$SourceRoot) { $SourceRoot=(Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
@@ -7,7 +7,7 @@ if (!$VendorRoot) { $VendorRoot=Join-Path (Split-Path $SourceRoot -Parent) '_ven
 $source=[IO.Path]::GetFullPath($SourceRoot)
 $vendor=[IO.Path]::GetFullPath($VendorRoot)
 $buildDir=Join-Path $source 'build\portable'
-$stage=Join-Path $source 'dist\ListenFree-Portable'
+$stage=if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $source 'dist\ListenFree-Portable' }
 $cmake=Join-Path $QtToolsRoot 'CMake_64\bin\cmake.exe'
 $compilerDir=Join-Path $QtToolsRoot 'mingw1310_64\bin'
 $qmmp=Join-Path $vendor 'qmmp-stage-qt'
@@ -43,6 +43,10 @@ try {
     $resolvedStage=[IO.Path]::GetFullPath($stage)
     $allowedRoot=[IO.Path]::GetFullPath((Join-Path $source 'dist')).TrimEnd('\')+'\'
     if (!$resolvedStage.StartsWith($allowedRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe stage path' }
+    $stageExe=Join-Path $resolvedStage 'listenfree.exe'
+    if (Get-Process listenfree -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $stageExe }) {
+        throw "Portable directory is in use: $resolvedStage"
+    }
     if (Test-Path -LiteralPath $resolvedStage) {
         $stagePrefix=$resolvedStage.TrimEnd('\')+'\'
         foreach ($entry in Get-ChildItem -LiteralPath $resolvedStage -Force) {
@@ -99,6 +103,6 @@ try {
     Copy-Item -LiteralPath (Join-Path $source 'licenses\VLC-GPL-2.0.txt') -Destination $licenseDir
     Copy-Item -LiteralPath (Join-Path $source 'licenses\Verblib-MIT-0.txt') -Destination $licenseDir
     Copy-Item -Path (Join-Path $source 'licenses\*.txt') -Destination $licenseDir -Force
-    & (Join-Path $source 'scripts\windows\test-portable-startup.ps1') -PackageRoot $stage
+    & (Join-Path $source 'scripts\windows\test-portable-startup.ps1') -PackageRoot $stage -DataDirectory (Join-Path $buildDir 'portable-startup-profile')
     Write-Host "便携目录：$stage"
 } finally { $env:PATH=$previousPath }

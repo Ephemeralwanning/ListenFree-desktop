@@ -1,4 +1,5 @@
 #include "platform_settings.h"
+#include "windows_media_session.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
@@ -125,6 +126,33 @@ PlatformSettings::PlatformSettings(QQuickWindow *window, QObject *shell,
   }
   status_.setInterval(1000);
   connect(&status_, &QTimer::timeout, this, &PlatformSettings::updateStatus);
+  mediaSession_ = new WindowsMediaSession(window_, this);
+  connect(mediaSession_, &WindowsMediaSession::buttonRequested, this, [this](auto button) {
+    switch (button) {
+    case WindowsMediaSession::Play: player_.play(); break;
+    case WindowsMediaSession::Pause:
+      if (const auto state = player_.state(); state == "Playing" || state == "Loading" || state == "Buffering") player_.pause();
+      break;
+    case WindowsMediaSession::Stop: player_.stop(); break;
+    case WindowsMediaSession::Next: player_.next(); break;
+    case WindowsMediaSession::Previous: player_.previous(); break;
+    }
+  });
+  connect(mediaSession_, &WindowsMediaSession::seekRequested, this, [this](qint64 position) {
+    if (player_.seekable() && !player_.live()) player_.seek(qBound<qint64>(0, position, player_.duration()));
+  });
+  // Coalesce track/queue/artwork bursts. The existing one-second status timer
+  // supplies timeline samples; frequent audio position signals don't flood COM.
+  mediaUpdate_.setSingleShot(true);
+  mediaUpdate_.setInterval(30);
+  connect(&mediaUpdate_, &QTimer::timeout, this, &PlatformSettings::updateMediaSession);
+  for (const auto signal : {&qmlbridge::PortableSession::currentTrackChanged,
+                            &qmlbridge::PortableSession::queueChanged})
+    connect(&player_, signal, this, [this] { mediaUpdate_.start(); });
+  connect(&player_, &qmlbridge::PortableSession::changed, this, [this, previous=QString{}]() mutable {
+    if (const auto state = player_.state(); state != previous) { previous = state; mediaUpdate_.start(); }
+  });
+  mediaUpdate_.start();
   status_.start();
   if (settings_.value("window.startInFullScreen", false).toBool())
     QTimer::singleShot(0, window_, &QWindow::showFullScreen);
@@ -136,6 +164,7 @@ PlatformSettings::PlatformSettings(QQuickWindow *window, QObject *shell,
     QTimer::singleShot(1000, &player_, &qmlbridge::PortableSession::play);
 }
 PlatformSettings::~PlatformSettings() {
+  delete mediaSession_;
   disconnect(window_, nullptr, this, nullptr);
   tray_.hide();
   SetThreadExecutionState(ES_CONTINUOUS);
@@ -218,6 +247,7 @@ void PlatformSettings::apply(const QString &key, const QVariant &value) {
   updateStatus();
 }
 void PlatformSettings::updateStatus() {
+  updateMediaSession();
   const auto state = player_.state();
   const bool playing = state == "Playing";
   SetThreadExecutionState(
@@ -242,6 +272,23 @@ void PlatformSettings::updateStatus() {
                             static_cast<ULONGLONG>(player_.duration()));
     }
   }
+}
+void PlatformSettings::updateMediaSession() {
+  if (!mediaSession_) return;
+  const auto track = player_.currentTrack();
+  WindowsMediaSession::State state;
+  state.hasTrack = !track.isEmpty();
+  state.title = track.value("title").toString();
+  state.artist = track.value("artist").toString();
+  state.album = track.value("album").toString();
+  state.artwork = track.value("artwork").toString();
+  state.playback = player_.state();
+  state.position = player_.position();
+  state.duration = player_.duration();
+  state.seekable = player_.seekable() && !player_.live();
+  state.previous = state.hasTrack;
+  state.next = player_.queueSongs().size() > 1;
+  mediaSession_->update(state);
 }
 bool PlatformSettings::eventFilter(QObject *watched, QEvent *event) {
   if(watched==window_ && (event->type()==QEvent::ApplicationPaletteChange || event->type()==QEvent::ThemeChange))applyTransparency();

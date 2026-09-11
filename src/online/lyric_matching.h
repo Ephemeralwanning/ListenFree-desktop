@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include "online/kuwo_lyrics.h"
 #include <cmath>
+#include <algorithm>
 
 namespace listenfree::online {
 // Adapt the existing WY word tuples to the LX format consumed by parseTimedLyrics.
@@ -133,5 +134,63 @@ inline int lyricCandidateScore(const QVariantMap& query,const QVariantMap& candi
     const double left=query.value("durationMs").toDouble()/1000,right=candidate.value("durationMs").toDouble()/1000,diff=std::abs(left-right);
     const double duration=!left||!right?.55:diff<=2?1:diff<=5?.9:diff<=10?.7:diff<=20?.35:std::max(0.0,1-diff/std::max(left,right)*3);
     return int(std::round(title*45+artist*25+duration*22+album*8));
+}
+inline bool manualLyricQuery(const QVariantMap& track, const QString& query) {
+    const auto term = normalizedLyricTitle(query);
+    const auto title = normalizedLyricTitle(track.value("title").toString());
+    const auto artist = normalizedLyricTitle(track.value("artist").toString());
+    return track.value("queryFromFilename").toBool() || (term != title
+        && term != (title+' '+artist).trimmed() && term != (artist+' '+title).trimmed());
+}
+inline QStringList lyricSearchQueries(const QVariantMap& track, const QString& query) {
+    QStringList queries{query.simplified()};
+    if(!manualLyricQuery(track, query)) {
+        const auto title = track.value("title").toString().simplified();
+        if(!title.isEmpty() && !queries.contains(title, Qt::CaseInsensitive)) queries.append(title);
+    }
+    // An empty/transient first response can succeed on the same keyword too.
+    // Keep this to one retry, not an unbounded auto-retry loop.
+    if(queries.size() == 1) queries.append(queries.first());
+    return queries;
+}
+inline QVariantList rankLyricCandidates(const QVariantMap& track, const QString& query, const QVariantList& rows) {
+    const bool manual = manualLyricQuery(track, query);
+    QVariantList ranked;
+    for(const auto& value : rows) {
+        auto row = value.toMap();
+        auto title = row.value("title").toString();
+        // Community entries may carry localized/alternative song names.
+        const auto target = manual ? query : track.value("title").toString();
+        for(const auto& alias : row.value("titleAliases").toStringList())
+            if(lyricTitleSimilarity(target, alias) > lyricTitleSimilarity(target, title)) title = alias;
+        row["title"] = title;
+        const double textMatch = qMax(lyricTextSimilarity(query, title),
+            qMax(lyricTextSimilarity(query, title+' '+row.value("artist").toString()),
+                 lyricTextSimilarity(query, row.value("artist").toString()+' '+title)));
+        const auto titleMatch = lyricTitleSimilarity(track.value("title").toString(), title);
+        const int score = manual ? qRound(100*textMatch) : lyricCandidateScore(track, row);
+        if(manual ? textMatch < .45 : (titleMatch < .55 || score < 55)) continue;
+        const auto wantedArtist = normalizedLyricTitle(track.value("artist").toString());
+        const auto foundArtist = normalizedLyricTitle(row.value("artist").toString());
+        if(!manual && !wantedArtist.isEmpty() && !foundArtist.isEmpty()) {
+            // Same-name songs by different artists are not alternative lyrics
+            // for the current recording. Preserve missing artist metadata and
+            // collaborations (e.g. "Artist / Guest") without accepting Muse's
+            // "Animals" when matching the Maroon 5 recording.
+            const auto containsArtist = (' '+foundArtist+' ').contains(' '+wantedArtist+' ')
+                || (' '+wantedArtist+' ').contains(' '+foundArtist+' ');
+            if(!containsArtist && lyricTextSimilarity(wantedArtist, foundArtist) < .3) continue;
+        }
+        const auto left = track.value("durationMs").toLongLong(), right = row.value("durationMs").toLongLong();
+        if(!manual && left > 0 && right > 0 && qAbs(left-right) > qMax(qint64(20000), left/10)) continue;
+        row["score"] = score;
+        ranked.append(row);
+    }
+    // Rank each provider independently: a well-tagged reissue on one service
+    // must not discard the correct recording with sparse metadata elsewhere.
+    std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        return a.toMap().value("score").toInt() > b.toMap().value("score").toInt();
+    });
+    return ranked;
 }
 }

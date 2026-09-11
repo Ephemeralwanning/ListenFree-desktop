@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ListenFree VERSION 0.3.1 LANGUAGES CXX)
+project(ListenFree VERSION 0.3.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -279,7 +279,9 @@ if(LISTENFREE_BUILD_QMMP_BACKEND)
     target_link_libraries(listenfree_portable PUBLIC Qt6::Multimedia Qt6::Quick)
     target_sources(listenfree_portable PRIVATE src/qmlbridge/smart_mix.cpp src/media/audio_tail_probe.h src/media/audio_tail_probe.cpp)
     target_sources(listenfree_portable PRIVATE src/media/mv_frame_stream.h src/media/mv_frame_stream.cpp)
+    target_sources(listenfree_portable PRIVATE src/media/artwork_video.h src/media/artwork_video.cpp)
     target_sources(listenfree_portable PRIVATE src/online/lyric_sources.cpp src/online/lyric_sources.h src/third_party/qqmusic_des/des.cpp)
+    target_sources(listenfree_portable PRIVATE src/online/lyric_search.cpp src/online/lyric_search.h)
     target_sources(listenfree_portable PRIVATE src/online/radio_catalog.h src/online/radio_catalog.cpp src/qmlbridge/radio_service.h src/qmlbridge/radio_service.cpp src/media/live_stream_relay.h src/media/live_stream_relay.cpp)
     set(LISTENFREE_LIVE_FFMPEG_ROOT "${_listenfree_vendor}/qmmp-vcpkg-installed-qt/x64-mingw-dynamic" CACHE PATH "FFmpeg already shipped with the Qmmp decoder")
     find_path(LISTENFREE_LIVE_FFMPEG_INCLUDE libavformat/avformat.h HINTS "${LISTENFREE_LIVE_FFMPEG_ROOT}/include" REQUIRED)
@@ -300,6 +302,13 @@ if(LISTENFREE_BUILD_QMMP_BACKEND)
         add_executable(listenfree_radio_tests tests/radio_tests.cpp)
         target_link_libraries(listenfree_radio_tests PRIVATE listenfree_portable Qt6::Test)
         add_executable(listenfree_portable_tests tests/portable_session_tests.cpp)
+        add_executable(listenfree_resource_tests tests/resource_ownership_tests.cpp)
+        target_link_libraries(listenfree_resource_tests PRIVATE listenfree_portable Qt6::Test Qt6::Quick)
+        target_compile_definitions(listenfree_resource_tests PRIVATE LISTENFREE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME listenfree_resource_tests COMMAND listenfree_resource_tests)
+        add_executable(listenfree_lyric_search_tests tests/lyric_search_tests.cpp)
+        target_link_libraries(listenfree_lyric_search_tests PRIVATE listenfree_portable Qt6::Test)
+        add_test(NAME listenfree_lyric_search_tests COMMAND listenfree_lyric_search_tests)
         add_executable(listenfree_bilibili_tests tests/bilibili_source_tests.cpp)
         target_link_libraries(listenfree_bilibili_tests PRIVATE listenfree_portable Qt6::Test)
         add_test(NAME listenfree_bilibili_tests COMMAND listenfree_bilibili_tests -o -,txt)
@@ -309,6 +318,9 @@ if(LISTENFREE_BUILD_QMMP_BACKEND)
     endif()
 endif()
 qt_add_executable(listenfree WIN32 src/app/listenfree.rc src/app/main.cpp src/app/platform_settings.h src/app/platform_settings.cpp src/app/shortcut_service.h src/app/shortcut_service.cpp src/qmlbridge/spring_value.h src/qmlbridge/lyric_text_metrics.h src/qmlbridge/background_contrast.h src/qmlbridge/album_mosaic_model.h)
+if(WIN32 AND LISTENFREE_BUILD_QMMP_BACKEND)
+    include(cmake/WindowsMediaSession.cmake)
+endif()
 if(WIN32 AND LISTENFREE_SEGMENT_HEAP)
     # The OS chooses the allocator before DLL initialization; unsupported Windows
     # versions ignore heapType. Keep this switch for reproducible legacy-heap A/B.
@@ -477,12 +489,28 @@ qt_add_shaders(listenfree listenfree_background_shaders
         music_player_desktop/shaders/immersive-atmosphere.frag
     FILES music_player_desktop/shaders/artwork-gaussian.frag music_player_desktop/shaders/lyric-word.frag music_player_desktop/shaders/lyric-grapheme.frag music_player_desktop/shaders/artwork-mesh.vert music_player_desktop/shaders/artwork-tone.frag music_player_desktop/shaders/artwork-flow.frag music_player_desktop/shaders/artwork-palette.frag music_player_desktop/shaders/artwork-kawase.frag music_player_desktop/shaders/artwork-flow-tint.frag
 )
+# Shared native scene-graph shaders, including the real GPU render check.
+foreach(_target listenfree listenfree_immersive_tests)
+    if(TARGET ${_target})
+        qt_add_shaders(${_target} ${_target}_diorama_shaders
+            PREFIX "/shaders"
+            BASE "music_player_desktop/shaders"
+            GLSL "150,300es"
+            FILES music_player_desktop/shaders/diorama-particles.vert
+                  music_player_desktop/shaders/diorama-particles.frag)
+    endif()
+endforeach()
 qt_add_shaders(listenfree listenfree_cover_shaders
     PREFIX "/shaders"
     BASE "music_player_desktop/shaders"
     GLSL "150,300es"
     FILES music_player_desktop/shaders/cover-rounded.frag
 )
+if(TARGET listenfree_resource_tests)
+    qt_add_resources(listenfree_resource_tests resource_test_shaders PREFIX "/shaders"
+        BASE "${CMAKE_CURRENT_BINARY_DIR}/.qsb"
+        FILES "${CMAKE_CURRENT_BINARY_DIR}/.qsb/cover-rounded.frag.qsb")
+endif()
 
 target_link_libraries(listenfree PRIVATE ole32 uuid Qt6::Multimedia listenfree_qmlbridge Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickDialogs2)
 if(LISTENFREE_BUILD_QMMP_BACKEND)
@@ -526,6 +554,9 @@ if(LISTENFREE_BUILD_TESTS)
     target_link_libraries(listenfree-sourcehost-fault-host PRIVATE listenfree_source_protocol Qt6::Core)
     target_include_directories(listenfree-sourcehost-fault-host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_dependencies(listenfree_tests listenfree-sourcehost listenfree-sourcehost-fault-host)
+    if(TARGET listenfree_portable_tests)
+        add_dependencies(listenfree_portable_tests listenfree-sourcehost-fault-host)
+    endif()
     add_executable(listenfree_sourcehost_fault_tests tests/sourcehost_fault_tests.cpp)
     target_link_libraries(listenfree_sourcehost_fault_tests PRIVATE listenfree_source_client listenfree_source_protocol Qt6::Test)
     target_include_directories(listenfree_sourcehost_fault_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

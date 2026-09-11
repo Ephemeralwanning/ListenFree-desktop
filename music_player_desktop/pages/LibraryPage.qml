@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Window
 import "../components"
 
 Item {
@@ -28,7 +29,27 @@ Item {
     }
     // A layout setting can clamp the restored index while its binding evaluates.
     // Persist afterwards so the settings revision cannot re-enter that binding.
-    onSelectedAlbumIndexChanged: Qt.callLater(saveAlbumPosition)
+    onSelectedAlbumIndexChanged: { Qt.callLater(saveAlbumPosition); Qt.callLater(syncAlbumWindow) }
+    readonly property bool albumFlowEnabled: section === "albums" && !albumGridLayout
+    readonly property int loadedAlbumCount: albumWindow.count
+    readonly property int albumCoverPixels: AppTheme.artworkPixels("Large", Screen.devicePixelRatio)
+    onAlbumFlowEnabledChanged: Qt.callLater(syncAlbumWindow)
+    // Match the bounded ListModel used by ImmersiveDiscQueue. Keep overlapping
+    // delegates alive so a wheel step retargets their existing animations.
+    ListModel { id: albumWindow }
+    function syncAlbumWindow() {
+        if (!albumFlowEnabled || !albums.length) { albumWindow.clear(); return }
+        const first = Math.max(0, selectedAlbumIndex - 4)
+        const last = Math.min(albums.length - 1, selectedAlbumIndex + 4)
+        while (albumWindow.count && albumWindow.get(0).albumIndex < first) albumWindow.remove(0)
+        while (albumWindow.count && albumWindow.get(albumWindow.count - 1).albumIndex > last)
+            albumWindow.remove(albumWindow.count - 1)
+        const before = albumWindow.count ? albumWindow.get(0).albumIndex - 1 : last
+        for (let i = before; i >= first; --i) albumWindow.insert(0, { albumIndex: i })
+        const after = albumWindow.count ? albumWindow.get(albumWindow.count - 1).albumIndex + 1 : first
+        for (let i = after; i <= last; ++i) albumWindow.append({ albumIndex: i })
+    }
+    Component.onCompleted: syncAlbumWindow()
     Connections {
         target: typeof backendSettingsController!=="undefined" ? backendSettingsController : null
         function onValueChanged(key,value){if(key==="list.rememberScrollPosition" && !value)page.selectedAlbumIndex=0}
@@ -70,7 +91,7 @@ Item {
     readonly property var albums: matching(catalog && catalog.albums ? catalog.albums : [], ["title"])
     readonly property var artists: matching(catalog && catalog.artists ? catalog.artists : [], ["name"])
     readonly property var songs: matching(catalog && catalog.songs ? catalog.songs : [], ["title", "artist", "album"])
-    onAlbumsChanged: restoreAlbumPosition()
+    onAlbumsChanged: { restoreAlbumPosition(); Qt.callLater(syncAlbumWindow) }
     readonly property string sectionTitle: section === "songs" ? qsTr("歌曲")
                                                    : section === "artists" ? qsTr("艺术家") : qsTr("专辑")
     readonly property string sectionCount: section === "songs" ? songs.length + qsTr(" 首歌曲")
@@ -198,15 +219,15 @@ Item {
         }
 
         Repeater {
-            model: page.section === "albums" && !page.albumGridLayout ? page.albums : []
+            model: albumWindow
 
             delegate: Item {
                 id: albumCard
-                objectName: "albumCard" + index
-                required property int index
-                required property var modelData
+                objectName: "albumCard" + albumIndex
+                required property int albumIndex
+                readonly property var album: page.albums[albumIndex] || ({})
 
-                readonly property int relativeIndex: page.albumRelative(index)
+                readonly property int relativeIndex: page.albumRelative(albumIndex)
                 readonly property int distance: Math.abs(relativeIndex)
                 readonly property bool active: distance === 0
                 readonly property real spatialScale: distance === 0 ? 1
@@ -215,8 +236,8 @@ Item {
                 readonly property real spatialOpacity: distance === 0 ? 1
                                                        : distance === 1 ? .86
                                                        : distance === 2 ? .50 : 0
-                readonly property url artworkSource: modelData.artwork || Qt.resolvedUrl("../assets/album_Cover_"
-                                                                    + ((index % 7) + 1) + ".png")
+                readonly property url artworkSource: album.artwork || Qt.resolvedUrl("../assets/album_Cover_"
+                                                                    + ((albumIndex % 7) + 1) + ".png")
 
                 z: 30 - distance
                 width: 290 * albumFlow.layoutScale
@@ -281,6 +302,7 @@ Item {
                     CoverArt {
                         id: albumCover
                         artworkTier: "Large"
+                        sourcePixelSize: page.albumCoverPixels
                         anchors.bottom: parent.bottom
                         anchors.bottomMargin: 8 * albumFlow.layoutScale
                         anchors.horizontalCenter: parent.horizontalCenter
@@ -296,7 +318,7 @@ Item {
                         anchors.topMargin: 12 * albumFlow.layoutScale
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: parent.width - 24
-                        text: albumCard.modelData.title || ""
+                        text: albumCard.album.title || ""
                         color: "#f8f8f8"
                         font.family: AppTheme.fontFamily
                         font.pixelSize: 22 * Math.min(albumFlow.layoutScale, 1.25)
@@ -310,7 +332,7 @@ Item {
                         anchors.topMargin: 45 * albumFlow.layoutScale
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: parent.width - 24
-                        text: albumCard.modelData.artist || ""
+                        text: albumCard.album.artist || ""
                         color: albumCard.active ? "#e4e7e9" : "#c8cbd0"
                         font.family: AppTheme.fontFamily
                         font.pixelSize: 13 * Math.min(albumFlow.layoutScale, 1.25)
@@ -322,11 +344,11 @@ Item {
                     TapHandler {
                         onTapped: {
                             if (!albumCard.active) {
-                                page.selectedAlbumIndex = albumCard.index
+                                page.selectedAlbumIndex = albumCard.albumIndex
                             } else {
                                 page.prepareCollectionTransition("Album",
-                                                                 albumCard.modelData.title,
-                                                                 albumCard.modelData.color || "#efb52c",
+                                                                 albumCard.album.title,
+                                                                 albumCard.album.color || "#efb52c",
                                                                  cardVisual, albumCover,
                                                                  albumCard.artworkSource)
                             }
@@ -348,11 +370,12 @@ Item {
             opacity: .18
 
             Repeater {
-                model: page.section === "albums" && !page.albumGridLayout ? page.albums : []
+                model: albumWindow
                 delegate: Image {
-                    required property int index
+                    required property int albumIndex
                     id: reflectionImage
-                    readonly property int relativeIndex: page.albumRelative(index)
+                    objectName: "albumReflection" + albumIndex
+                    readonly property int relativeIndex: page.albumRelative(albumIndex)
                     readonly property int distance: Math.abs(relativeIndex)
                     width: 274 * albumFlow.layoutScale
                     height: width
@@ -360,7 +383,11 @@ Item {
                     y: 0
                     scale: distance === 0 ? 1 : distance === 1 ? .88 : distance === 2 ? .76 : .68
                     opacity: distance === 0 ? 1 : distance === 1 ? .82 : distance === 2 ? .42 : 0
-                    source: distance <= 3 && page.albums[index] ? page.albums[index].artwork || "" : ""
+                    // Share the primary cover's decoded pixmap and CDN variant.
+                    source: distance <= 3 && page.albums[albumIndex]
+                        ? AppTheme.artworkUrl(page.albums[albumIndex].artwork || "", page.albumCoverPixels) : ""
+                    sourceSize: Qt.size(page.albumCoverPixels, page.albumCoverPixels)
+                    asynchronous: true
                     fillMode: Image.PreserveAspectCrop
                     smooth: true
                     mipmap: true

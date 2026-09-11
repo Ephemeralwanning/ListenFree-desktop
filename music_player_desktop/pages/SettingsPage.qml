@@ -79,7 +79,7 @@ Item {
         qsTr("设置启动队列、音频输出与切歌行为。"),
         qsTr("调整界面动效、播放详情和歌词显示。"),
         qsTr("管理下载文件、并发任务与歌词。"),
-        qsTr("导入并选择 LX JavaScript 音源；在搜索框粘贴酷我歌曲链接即可查找。"),
+        qsTr("导入洛雪音源"),
         qsTr("管理网易云音乐与哔哩哔哩的 Cookie 登录状态。"),
         qsTr("管理应用内和全局快捷键。"),
         qsTr("导出、导入或恢复公开设置。"),
@@ -729,7 +729,7 @@ Item {
                         type: "action",
                         actionLabel: qsTr("移除")
                     }))),
-                    { title: qsTr("重新扫描资料库"), detail: qsTr("扫描所有已配置目录。"), key: page.settingKeys.rescanLibrary, type: "action", actionLabel: page.libraryController && page.libraryController.scanning ? qsTr("取消") : qsTr("扫描") },
+                    { title: qsTr("重新扫描资料库"), detail: qsTr("扫描所有已配置目录，也会重新加入仅从资料库移除的歌曲。"), key: page.settingKeys.rescanLibrary, type: "action", actionLabel: page.libraryController && page.libraryController.scanning ? qsTr("取消") : qsTr("扫描") },
                     { title: qsTr("合并重复歌曲"), detail: qsTr("先按大小和完整哈希执行只读分析。"), key: page.settingKeys.analyzeDuplicates, type: "action", actionLabel: qsTr("检查") }
                 ]
                 onSettingChanged: (key, value) => page.handleSettingChanged(key, value)
@@ -1218,7 +1218,7 @@ Item {
                 primaryText: page.primaryText
                 secondaryText: page.secondaryText
                 rows: [
-                    { title: "ListenFree", detail: qsTr("构建于 Qt 6.11.2。"), type: "info", readOnlyValue: "0.3.0" },
+                    { title: "ListenFree", detail: qsTr("构建于 Qt 6.11.2。"), type: "info", readOnlyValue: "0.3.2" },
                     { title: qsTr("复制诊断信息"), detail: qsTr("不会包含账号凭据和完整日志。"), key: page.settingKeys.copyDiagnostics, type: "action", actionLabel: qsTr("复制") },
                     { title: qsTr("检查软件更新"), detail: qsTr("只检查 GitHub Releases，不自动下载。"), key: page.settingKeys.checkUpdates, type: "action", actionLabel: qsTr("检查") },
                     { title: qsTr("打开下载页面"), detail: qsTr("使用系统浏览器打开 GitHub Releases。"), key: page.settingKeys.openReleasePage, type: "action", actionLabel: qsTr("打开") },
@@ -1408,6 +1408,16 @@ Item {
                 Text { anchors.centerIn: parent; text: "×"; color: page.primaryText; font.family: AppTheme.fontFamily; font.pixelSize: 22 }
                 HoverHandler { id: closeSourceHover }
                 TapHandler { onTapped: page.sourceManagerOpen = false }
+            }
+
+            UiButton {
+                objectName: "sourceReconnectButton"
+                anchors.right: closeSourceManager.left
+                anchors.rightMargin: 12
+                anchors.verticalCenter: closeSourceManager.verticalCenter
+                label: qsTr("重新连接")
+                visible: page.sourceController && page.sourceController.hostAvailable
+                onClicked: page.sourceController.restartHost()
             }
 
             Rectangle {

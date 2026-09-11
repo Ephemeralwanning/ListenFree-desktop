@@ -111,12 +111,18 @@ private slots:
     void libraryControllerPersistsAndUsesFolders();
     void libraryAutoWatchFindsSettledFilesAndHonorsSwitch();
     void libraryAutoWatchWaitsForManualScan();
+    void libraryAutoWatchRemovesMissingFilesAndSubtrees();
+    void libraryRemovalExclusionsSurviveScans();
+    void libraryReconciliationHonorsScopeAndOfflineRoots();
+    void libraryFailedOrCancelledScanDoesNotPrune();
     void settingsControllerPersistsValues();
     void libraryScannerExcludesSymbolicLinks();
     void libraryScannerDeduplicatesOverlappingRoots();
     void sourceProtocolRoundTrip();
     void sourceProtocolRejectsInvalidFrame();
     void sourceHostProcessLifecycle();
+    void sourceHostBinaryTransport_data();
+    void sourceHostBinaryTransport();
     void sourceHostLoadsCompressedPlugin();
     void sourceHostResolvesLyricAndPic();
     void sourceHostProvidesAsyncRequestBridge();
@@ -879,6 +885,116 @@ void BackendTests::libraryAutoWatchWaitsForManualScan() {
     scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
 }
 
+void BackendTests::libraryAutoWatchRemovesMissingFilesAndSubtrees() {
+    using namespace listenfree;
+    QTemporaryDir directory;
+    const auto root=directory.filePath("music");
+    QVERIFY(QDir().mkpath(root+"/album/disc"));
+    const auto write=[](const QString& path) {
+        QFile file(path);return file.open(QIODevice::WriteOnly) && file.write("fixture")==7;
+    };
+    QVERIFY(write(root+"/first.mp3"));QVERIFY(write(root+"/album/disc/second.flac"));
+    infrastructure::database::Database db;const auto path=directory.filePath("deletions.sqlite");
+    QVERIFY(db.open(path));
+    infrastructure::database::TrackRepository tracks(db);
+    infrastructure::database::LibraryFolderRepository folders(db);
+    infrastructure::library::LocalLibraryScannerAdapter scanner(std::make_unique<infrastructure::library::BasicMetadataReader>());
+    qmlbridge::LibraryController controller(scanner,tracks,&folders,path);
+    QVERIFY(controller.addRoot(root));QTRY_VERIFY(!controller.scanning());QCOMPARE(controller.totalCount(),2);
+    controller.setAutoWatchEnabled(true);
+    QTest::qWait(2800);
+    QVERIFY(QFile::remove(root+"/first.mp3"));
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(),1,7000);
+    QVERIFY(QDir(root+"/album").removeRecursively());
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(),0,7000);
+    QVERIFY(QDir().mkpath(root+"/album/disc"));QVERIFY(write(root+"/album/disc/restored.mp3"));
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(),1,7000);
+    // No live watch survives a removal while monitoring/the app is off.
+    controller.setAutoWatchEnabled(false);
+    QVERIFY(QDir(root+"/album").removeRecursively());
+    controller.setAutoWatchEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(controller.totalCount(),0,7000);
+    QVERIFY2(controller.lastError().isEmpty(),qPrintable(controller.lastError()));
+}
+
+void BackendTests::libraryRemovalExclusionsSurviveScans() {
+    using namespace listenfree;
+    QTemporaryDir directory;
+    const auto root=directory.filePath("music_%");QVERIFY(QDir().mkpath(root));
+    const auto filePath=root+"/excluded.mp3";
+    { QFile file(filePath);QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture"); }
+    const auto path=directory.filePath("exclusion.sqlite");
+    infrastructure::database::Database db;QVERIFY(db.open(path));
+    infrastructure::database::TrackRepository tracks(db);
+    infrastructure::database::LibraryFolderRepository folders(db);
+    infrastructure::library::LocalLibraryScannerAdapter scanner(std::make_unique<infrastructure::library::BasicMetadataReader>());
+    qmlbridge::LibraryController controller(scanner,tracks,&folders,path);
+    QVERIFY(controller.addRoot(root));QTRY_VERIFY(!controller.scanning());QCOMPARE(tracks.search("").size(),1);
+    const auto stale=tracks.search("");
+    QVERIFY(db.removeLocalTrack(QDir::toNativeSeparators(filePath),true));
+    QVERIFY(QFileInfo::exists(filePath));QVERIFY(tracks.search("").empty());
+    // Simulate an already queued batch committing after the user's removal.
+    QVERIFY(db.upsertTracks(stale,true));QVERIFY(tracks.search("").empty());
+    infrastructure::database::Database reopened;QVERIFY(reopened.openExisting(path));
+    QCOMPARE(reopened.loadLocalFiles().size(),1);QVERIFY(reopened.loadLocalFiles().front().excluded);
+    controller.scan({root});QTRY_VERIFY(!controller.scanning());QCOMPARE(controller.totalCount(),0);
+    controller.scanDefault();QTRY_VERIFY(!controller.scanning());QCOMPARE(controller.totalCount(),1);
+    QVERIFY(!db.loadLocalFiles().front().excluded);
+    QVERIFY(QFile::remove(filePath));QVERIFY(db.removeLocalTrack(filePath,false));
+    QVERIFY(db.upsertTracks(stale,true));QVERIFY(tracks.search("").empty());
+}
+
+void BackendTests::libraryReconciliationHonorsScopeAndOfflineRoots() {
+    using namespace listenfree;
+    QTemporaryDir directory;
+    const auto root=directory.filePath("music");
+    const auto outside=directory.filePath("music-other");
+    const auto offline=directory.filePath("offline");
+    for(const auto& folder:QStringList{root+"/a",root+"/b",outside,offline})QVERIFY(QDir().mkpath(folder));
+    infrastructure::database::Database db;QVERIFY(db.open(directory.filePath("scope.sqlite")));
+    QVERIFY(db.addLibraryFolder(root));QVERIFY(db.addLibraryFolder(offline));
+    infrastructure::library::BasicMetadataReader reader;
+    QList<domain::Track> records;
+    for(const auto& filePath:QStringList{root+"/a/one.mp3",root+"/b/two.mp3",outside+"/three.mp3",offline+"/four.mp3"}) {
+        { QFile file(filePath);QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture"); }
+        const auto track=reader.read(std::filesystem::path(filePath.toStdWString()));QVERIFY(track);
+        records.append(*track);QVERIFY(db.upsertTrack(*track));QVERIFY(QFile::remove(filePath));
+    }
+    QVERIFY(QDir().rmdir(offline));
+    QVERIFY(db.pruneMissingLocalFiles({root+"/a"},false));
+    QVERIFY(!db.findTrack(records[0].id));QVERIFY(db.findTrack(records[1].id));
+    QVERIFY(db.pruneMissingLocalFiles({offline},true));QVERIFY(db.findTrack(records[3].id));
+    QVERIFY(db.pruneMissingLocalFiles({root},true));QVERIFY(!db.findTrack(records[1].id));
+    QVERIFY(db.findTrack(records[2].id));QVERIFY(db.findTrack(records[3].id));
+}
+
+void BackendTests::libraryFailedOrCancelledScanDoesNotPrune() {
+    using namespace listenfree;
+    struct DeferredScanner final:application::ILocalLibraryScanner {
+        application::ScanCallbacks callbacks;
+        application::ScanId start(const application::ScanRequest&,application::ScanCallbacks next) override {
+            callbacks=std::move(next);return 1;
+        }
+        void cancel(application::ScanId) noexcept override {}
+    } scanner;
+    QTemporaryDir directory;const auto root=directory.filePath("music");QVERIFY(QDir().mkpath(root));
+    const auto filePath=root+"/removed.mp3";
+    { QFile file(filePath);QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture"); }
+    infrastructure::library::BasicMetadataReader reader;
+    const auto track=reader.read(std::filesystem::path(filePath.toStdWString()));QVERIFY(track);
+    infrastructure::database::Database db;const auto path=directory.filePath("failed.sqlite");QVERIFY(db.open(path));
+    QVERIFY(db.upsertTrack(*track));QVERIFY(QFile::remove(filePath));
+    infrastructure::database::TrackRepository tracks(db);
+    qmlbridge::LibraryController controller(scanner,tracks,nullptr,path);
+    controller.scan({root});controller.cancel();scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
+    QTRY_VERIFY(!controller.scanning());QVERIFY(db.findTrack(track->id));
+    controller.scan({root});scanner.callbacks.onBatch({domain::Track{}});
+    scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
+    QTRY_VERIFY(!controller.scanning());QVERIFY(!controller.lastError().isEmpty());QVERIFY(db.findTrack(track->id));
+    controller.scan({root});scanner.callbacks.onFinished({application::ScanStatus::Completed,{}});
+    QTRY_VERIFY(!controller.scanning());QVERIFY(controller.lastError().isEmpty());QVERIFY(!db.findTrack(track->id));
+}
+
 void BackendTests::settingsControllerPersistsValues() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -1046,6 +1162,57 @@ void BackendTests::sourceProtocolRejectsInvalidFrame() {
     const auto encoded = listenfree::sourcehost::SourceProtocol::encode(incompatible);
     QVERIFY(!listenfree::sourcehost::SourceProtocol::decode(encoded, output, &error));
     QCOMPARE(error, QStringLiteral("unsupported-protocol-version"));
+}
+
+void BackendTests::sourceHostBinaryTransport_data() {
+    QTest::addColumn<int>("inputLength");
+    QTest::addColumn<int>("outputLength");
+    for (const int size : {281, 282, 283, 3338, 6656})
+        QTest::newRow(qPrintable(QStringLiteral("input-%1").arg(size))) << size << 0;
+    for (const int size : {265, 266, 267, 3338})
+        QTest::newRow(qPrintable(QStringLiteral("output-%1").arg(size))) << 0 << size;
+}
+
+void BackendTests::sourceHostBinaryTransport() {
+    using namespace listenfree::sourcehost;
+    QFETCH(int, inputLength);
+    QFETCH(int, outputLength);
+    SourceMessage request;
+    request.type = MessageType::Hello;
+    request.requestId = QStringLiteral("binary-probe");
+    SourceMessage expected;
+    expected.type = MessageType::HelloAck;
+    expected.requestId = request.requestId;
+    expected.payload = {{QStringLiteral("ok"), true}, {QStringLiteral("messageType"), QStringLiteral("hello")}};
+    if (inputLength) {
+        request.payload.insert(QStringLiteral("padding"), QString{});
+        const int padding = inputLength - int(SourceProtocol::encode(request).size() - 4);
+        QVERIFY(padding >= 0);
+        request.payload.insert(QStringLiteral("padding"), QString(padding, QChar('x')));
+        QCOMPARE(SourceProtocol::encode(request).size() - 4, inputLength);
+    } else {
+        const int padding = outputLength - int(SourceProtocol::encode(expected).size() - 4);
+        QVERIFY(padding >= 0);
+        request.requestId += QString(padding, QChar('r'));
+        expected.requestId = request.requestId;
+        QCOMPARE(SourceProtocol::encode(expected).size() - 4, outputLength);
+    }
+    QProcess process;
+    process.start(QCoreApplication::applicationDirPath() + QStringLiteral("/listenfree-sourcehost.exe"));
+    QVERIFY(process.waitForStarted(3000));
+    QByteArray actual;
+    connect(&process, &QProcess::readyReadStandardOutput, &process, [&] { actual += process.readAllStandardOutput(); });
+    const auto frame = SourceProtocol::encode(request);
+    QCOMPARE(process.write(frame), frame.size());
+    QTRY_VERIFY_WITH_TIMEOUT(!actual.isEmpty() || process.state() == QProcess::NotRunning, 3000);
+    const auto encoded = SourceProtocol::encode(expected);
+    // Compare raw pipe bytes: a text-mode stdout inserts CR into binary headers.
+    QTRY_VERIFY_WITH_TIMEOUT(actual.size() >= encoded.size() || process.state() == QProcess::NotRunning, 3000);
+    const auto stateBeforeCleanup = process.state();
+    const auto received = actual;
+    process.kill();process.waitForFinished(3000);
+    QCOMPARE(stateBeforeCleanup, QProcess::Running);
+    QCOMPARE(received, encoded);
 }
 
 void BackendTests::sourceHostProcessLifecycle() {

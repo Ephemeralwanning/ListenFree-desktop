@@ -47,7 +47,7 @@ public:
     [[nodiscard]] bool isOpen() const noexcept { return db_.isValid() && db_.isOpen(); }
     bool migrate();
     bool upsertTrack(const domain::Track& track);
-    bool upsertTracks(std::span<const domain::Track> tracks);
+    bool upsertTracks(std::span<const domain::Track> tracks, bool fromScan = false);
     // Recheck missing relations under the write lock; never restore a deleted
     // track or overwrite an edit made while its tags were read in the worker.
     bool restoreMissingRelations(std::span<const domain::Track> tracks);
@@ -63,6 +63,9 @@ public:
     bool removePlaylist(const domain::PlaylistId& id);
     bool clearLibraryIndex();
     bool removeTrack(const QString& id);
+    bool removeLocalTrack(const QString& path, bool excludeFromScan);
+    bool restoreExcludedFiles(const QStringList& roots);
+    bool pruneMissingLocalFiles(const QStringList& roots, bool recursive);
     bool recordPlayHistory(const domain::TrackId& id,
                            std::chrono::system_clock::time_point when);
     [[nodiscard]] std::optional<std::string> getSetting(const QString& key) const;

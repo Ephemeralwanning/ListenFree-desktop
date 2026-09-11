@@ -110,6 +110,7 @@ domain::Track PortableSession::toTrack(const QVariantMap& map) {
 PortableSession::PortableSession(infrastructure::database::Database& database, const QString& path,
                                  SourceController& sources, QObject* parent)
     : QObject(parent), database_(database), databasePath_(path), sources_(sources) {
+    connect(&lyricSearch_, &online::LyricSearch::changed, this, &PortableSession::lyricMatchChanged);
     uiSettings_.setGroupsEnabled(false);
     QSettings().setValue("ListenFree/clearShuffleHistory",QString::fromStdString(database_.getSetting("playback.clearShuffleHistory").value_or("true"))=="true");
     application::PlaybackEvents events;
@@ -190,12 +191,20 @@ PortableSession::PortableSession(infrastructure::database::Database& database, c
         }
         if (id != pending_ || currentTrack().value("entryId").toString() != pendingEntry_) return;
         pending_.clear();
-        if (!error.isEmpty()) { fail(error); return; }
+        if (!error.isEmpty()) {
+            fail(error, currentTrack().value("source") == "bili" || sources_.hostReady());
+            return;
+        }
         startResolved(data.value("url").toString(), data.value("headers").toMap());
     });
     connect(&sources_, &SourceController::activeChanged, this, [this] { if (loading_) stop(); });
     connect(&libraryLoad_, &QFutureWatcher<LibraryLoadResult>::finished, this, [this] {
-        auto result = libraryLoad_.result();
+        libraryReloadActive_=false;
+        if(reloadAgain_) { reloadAgain_=false;reload();return; }
+        // result() copies the vector and leaves another complete catalog in
+        // the watcher's future until the next scan. Consume the finished value.
+        auto future = libraryLoad_.future();
+        auto result = future.takeResult();
         auto values = std::move(result.tracks);
         for (const auto& repaired : result.repaired) {
             const auto row = toMap(repaired);
@@ -238,7 +247,7 @@ PortableSession::PortableSession(infrastructure::database::Database& database, c
         }
         for(auto it=artists.begin();it!=artists.end();++it) it.value()["subtitle"]=QStringLiteral("%1 首 · %2 张专辑").arg(it.value().value("count").toInt()).arg(it.value().value("albumCount").toInt());
         for (const auto& artist : artists) artists_.append(artist);
-        tracks_.setTracks(std::move(values)); ready_ = true;
+        tracks_.setRows(songs_); ready_ = true;
         emit catalogChanged();
         if (reloadAgain_) { reloadAgain_ = false; reload(); }
     });
@@ -272,7 +281,8 @@ QString PortableSession::mediaFormat() const {
 }
 
 void PortableSession::reload() {
-    if (libraryLoad_.isRunning()) { reloadAgain_ = true; return; }
+    if (libraryReloadActive_) { reloadAgain_ = true; return; }
+    libraryReloadActive_=true;
     const auto path = databasePath_;
     libraryLoad_.setFuture(QtConcurrent::run([path] {
         infrastructure::database::Database db;
@@ -379,7 +389,8 @@ void PortableSession::beginCurrent() {
         fetchLyrics(track.value("rid").toString());
         pendingEntry_ = track.value("entryId").toString();
         pending_ = sources_.resolveMusicUrl(sources_.activeId(), QString::fromStdString(database_.getSetting("playback.quality").value_or("flac")), online::sourceMusicInfo(track));
-        if (pending_.isEmpty()) fail(sources_.lastError());
+        if (pending_.isEmpty())
+            fail(sources_.lastError(), track.value("source") == "bili" || sources_.hostReady());
     } else {
         const auto local = track.value("localPath").toString();
         if (!local.isEmpty()) {
@@ -598,11 +609,11 @@ void PortableSession::setPlaybackMode(const QString& requested) {
 }
 void PortableSession::syncQueue() {
     if (batching_) return;
-    QVariantList nextView; std::vector<domain::Track> values;
-    for (auto* track : navigation_.tracks()) { const auto map = entries_.value(track); nextView.append(map); values.push_back(toTrack(map)); }
+    QVariantList nextView;
+    for (auto* track : navigation_.tracks()) nextView.append(entries_.value(track));
     if (queueView_ != nextView) {
         queueView_ = std::move(nextView);
-        queueModel_.setTracks(std::move(values));
+        queueModel_.setRows(queueView_);
         emit queueContentsChanged();
     }
     queueModel_.setCurrentIndex(navigation_.currentIndex());
@@ -672,8 +683,7 @@ void PortableSession::sortTracks(const QString& column, const QString& order) {
         const auto left = a.toMap().value(column).toString(), right = b.toMap().value(column).toString();
         return descending ? QString::localeAwareCompare(left, right) > 0 : QString::localeAwareCompare(left, right) < 0;
     });
-    std::vector<domain::Track> values; for (const auto& song : songs_) values.push_back(toTrack(song.toMap()));
-    tracks_.setTracks(std::move(values)); emit catalogChanged();
+    tracks_.setRows(songs_); emit catalogChanged();
 }
 void PortableSession::search(const QString& searchText) {
     query_ = searchText.trimmed(); searchPage_ = 1; searchTotal_ = -1;
@@ -1074,10 +1084,8 @@ bool PortableSession::removeLibraryTrack(const QVariantMap& track,bool trashFile
         if(!QFile::moveToTrash(path)){emit notice(QStringLiteral("无法移入回收站，请检查文件是否被占用"));return false;}
         const int index=queueIndexFor(track);if(index>=0)removeFromQueue(index);
     }
-    QString id=track.value("trackId").toString();
-    for(const auto& value:songs_) if(songKey(value.toMap())==songKey(track)){id=value.toMap().value("trackId").toString();break;}
-    if(!database_.removeTrack(id)){emit notice(QStringLiteral("资料库索引更新失败"));return false;}
-    reload();return true;
+    if(!database_.removeLocalTrack(path,!trashFile)){emit notice(QStringLiteral("资料库索引更新失败"));return false;}
+    reload();emit localLibraryChanged();return true;
 }
 QVariantMap PortableSession::readTrackTags(const QVariantMap& track) const {
     auto result=track;const auto path=track.value("localPath").toString();

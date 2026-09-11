@@ -115,6 +115,10 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
         if (state_ == HostState::Ready) restartAttempts_ = 0;
     });
     connect(&handshakeTimer_, &QTimer::timeout, this, [this] {
+        // A busy GUI thread can receive this timer before the pipe notification.
+        // Consume an acknowledgement already in the pipe before declaring failure.
+        process_->waitForReadyRead(0);
+        processFrames();
         failHandshake(QStringLiteral("sourcehost-handshake-timeout"));
     });
     connect(&stopTimer_, &QTimer::timeout, this, [this] {
@@ -153,6 +157,9 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
         hello.requestId = handshakeRequestId_;
         if (process_->write(SourceProtocol::encode(hello)) < 0) {
             failHandshake(QStringLiteral("sourcehost-hello-write-failed"));
+        } else {
+            // Cold DLL loading and shell construction are not handshake time.
+            handshakeTimer_.start(5000);
         }
     });
     connect(process_.get(), &QProcess::readyRead, this, &SourceHostClient::handleStandardOutput);
@@ -161,9 +168,10 @@ SourceHostClient::SourceHostClient(QString executablePath, QObject* parent)
         restartStabilityTimer_.stop();
         stopTimer_.stop();
         closeJobObject();
+        const bool failed = status == QProcess::CrashExit || exitCode != 0 || !handshakeComplete_;
         handshakeComplete_ = false;
-        const bool failed = status == QProcess::CrashExit || exitCode != 0;
         if (failed && !stopping_) {
+            transitionTo(HostState::Stopping);
             finishAll(RequestTerminal::HostCrashed);
             readBuffer_.clear();
             emit crashed();
@@ -223,9 +231,8 @@ bool SourceHostClient::start() {
     handshakeComplete_ = false;
     handshakeRequestId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     readBuffer_.clear();
-    process_->start(executablePath_);
-    handshakeTimer_.start(1000);
     transitionTo(HostState::Starting);
+    process_->start(executablePath_);
     return true;
 }
 
@@ -235,6 +242,7 @@ void SourceHostClient::stop() noexcept {
     restartStabilityTimer_.stop();
     handshakeTimer_.stop();
     handshakeComplete_ = false;
+    transitionTo(HostState::Stopping);
     finishAll(RequestTerminal::HostStopped);
     readBuffer_.clear();
     if (!running()) {
@@ -342,11 +350,12 @@ void SourceHostClient::transitionTo(HostState state) {
 }
 
 void SourceHostClient::failHandshake(const QString& reason) {
-    if (handshakeComplete_ || process_->state() == QProcess::NotRunning) return;
+    if (stopping_ || state_ == HostState::Stopping || handshakeComplete_ ||
+        process_->state() == QProcess::NotRunning) return;
     handshakeTimer_.stop();
     emit protocolError(reason);
-    stopping_ = true;
-    restartInProgress_ = false;
+    // Protocol/startup failure must use the bounded crash recovery path.
+    // stopping_ is reserved for an explicit stop or destruction.
     transitionTo(HostState::Stopping);
     process_->kill();
 }
@@ -366,6 +375,10 @@ void SourceHostClient::finishAll(RequestTerminal terminal) {
 }
 
 void SourceHostClient::processFrames() {
+    if (stopping_ || state_ == HostState::Stopping) {
+        process_->readAll();
+        return;
+    }
     readBuffer_.append(process_->readAll());
     while (readBuffer_.size() >= 4) {
         QDataStream header(readBuffer_.left(4));

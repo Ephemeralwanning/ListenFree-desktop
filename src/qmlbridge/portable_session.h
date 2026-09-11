@@ -7,6 +7,7 @@
 #include "media/live_stream_relay.h"
 #include "media/audio_tail_probe.h"
 #include "online/apple_dynamic_artwork_provider.h"
+#include "online/lyric_search.h"
 #include <QFutureWatcher>
 #include <QCache>
 #include <QElapsedTimer>
@@ -79,6 +80,7 @@ class PortableSession final : public QObject {
     Q_PROPERTY(QString audioEffectsMessage READ audioEffectsMessage NOTIFY equalizerChanged)
     Q_PROPERTY(QString mediaFormat READ mediaFormat NOTIFY changed)
     Q_PROPERTY(QVariantList lyricCandidates READ lyricCandidates NOTIFY lyricMatchChanged)
+    Q_PROPERTY(QVariantList lyricMatchSources READ lyricMatchSources NOTIFY lyricMatchChanged)
     Q_PROPERTY(QString lyricPreview READ lyricPreview NOTIFY lyricPreviewChanged)
     Q_PROPERTY(QVariantList lyricPreviewLines READ lyricPreviewLines NOTIFY lyricPreviewChanged)
     Q_PROPERTY(QString lyricMatchError READ lyricMatchError NOTIFY lyricMatchChanged)
@@ -96,11 +98,12 @@ public:
     Q_INVOKABLE void searchMetadataMatches(const QVariantMap& track, const QString& query, const QString& source = "wy");
     Q_INVOKABLE void cancelMetadataMatch();
     Q_INVOKABLE QVariantMap metadataMatchValues(int index, const QStringList& fields) const;
-    QVariantList lyricCandidates() const { return lyricCandidates_; }
+    QVariantList lyricCandidates() const { return lyricSearch_.results(); }
+    QVariantList lyricMatchSources() const { return lyricSearch_.sources(); }
     QString lyricPreview() const { return lyricPreview_; }
     QVariantList lyricPreviewLines() const { return lyricPreviewLines_; }
-    QString lyricMatchError() const { return lyricMatchError_; }
-    bool lyricMatchBusy() const { return lyricMatchBusy_; }
+    QString lyricMatchError() const { return lyricSearch_.message(); }
+    bool lyricMatchBusy() const { return lyricSearch_.busy(); }
     Q_INVOKABLE QVariantMap lyricMatchSeed(const QVariantMap& track) const;
     Q_INVOKABLE void searchLyricMatches(const QVariantMap& track, const QString& query = {}, const QString& source = "all");
     Q_INVOKABLE void previewLyricMatch(int index);
@@ -240,6 +243,7 @@ signals:
     void devicesChanged();
     void changed();
     void catalogChanged();
+    void localLibraryChanged();
     void currentTrackChanged();
     void queueChanged();
     void queueContentsChanged();
@@ -260,27 +264,8 @@ private:
     void fetchMetadataArtwork(const QUrl& url, quint64 generation);
     bool metadataMatchBusy_{false};
     QString metadataMatchError_;
-    QVariantList lyricCandidates_;
-    QVariantMap lyricMatchTrack_;
-    QString lyricPreview_, lyricMatchError_;
-    QHash<QString,qint64> lyricRetryAfter_;
-    bool lyricMatchBusy_{false};
-    QHash<QString,QPointer<QNetworkReply>> lyricSearchReplies_;
-    QMap<QString,QVariantList> lyricSearchRows_;
-    QStringList lyricSearchFailures_;
-    void finishLyricSearch();
-    void finishLyricVerification();
-    bool requestLyricSearch(const QString& provider, const QString& term, bool fallback = false);
-    QVariantList lyricProbePool_;
-    QString lyricMatchQuery_;
-    quint64 lyricMatchGeneration_{0};
-    bool lyricVerifying_{false};
+    QString lyricPreview_;
     QVariantList lyricPreviewLines_;
-    QHash<int,QPointer<QNetworkReply>> lyricProbeReplies_;
-    QHash<int,QString> lyricProbeCache_;
-    void pumpLyricCandidates();
-    void requestLyricCandidate(int index);
-    void selectCachedLyric(int index);
     QVariantMap pendingEmbeddedLyrics_;
     QFutureWatcher<QString> embeddedLyricWrite_;
     QVariantMap embeddedLyricWriteTags_;
@@ -330,6 +315,7 @@ private:
     };
     QFutureWatcher<LibraryLoadResult> libraryLoad_;
     QNetworkAccessManager network_;
+    online::LyricSearch lyricSearch_{network_};
     QString platform_{"kw"};
     QString searchCategory_{"songs"}, searchError_;
     int searchPage_{1}, searchTotal_{-1};
@@ -362,6 +348,7 @@ private:
     int consecutiveErrors_{0};
     bool batching_{false};
     bool loading_{false}, mediaReady_{false}, ready_{false}, searchBusy_{false}, stopped_{false}, reloadAgain_{false};
+    bool libraryReloadActive_{false};
     quint64 generation_{0};
     quint64 seekRequest_{0};
     bool smartTransition_{false};

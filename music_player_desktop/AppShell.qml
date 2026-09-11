@@ -617,6 +617,15 @@ Item {
             }
             shell.selectedCollectionRows=shell.selectedCollectionRows.map(row => row.localPath && row.localPath.toLowerCase()===String(track.localPath).toLowerCase()?Object.assign({},row,track):row)
         }
+        function onCatalogChanged() {
+            if(shell.selectedOnlineCollection || (shell.collectionMorphKind!=="Album" && shell.collectionMorphKind!=="Artist"))return
+            const artist=shell.collectionMorphKind==="Artist"
+            shell.selectedCollectionRows=(shell.catalog.songs || []).filter(row =>
+                (artist ? (row.artist || qsTr("未知艺术家")) : (row.album || qsTr("未知专辑")))===shell.selectedCollectionTitle)
+            const first=shell.selectedCollectionRows[0] || ({})
+            shell.selectedCollectionSubtitle=(artist ? qsTr("艺术家") : (first.artist || qsTr("未知艺术家")))+" · "+shell.selectedCollectionRows.length+qsTr(" 首歌曲")
+            shell.selectedCollectionArtwork=first.artwork || ""
+        }
     }
 
     function openMusicEditor(track) {
@@ -1080,14 +1089,14 @@ Item {
                     width: searchField.width
                     height: searchField.expanded ? 40 + Math.min(8,searchField.suggestions.length)*36 : 32
                     radius: 10; clip: true
-                    color: shell.artworkCanvasActive ? "transparent" : searchField.expanded ? AppTheme.floatingSurface : searchInput.activeFocus ? AppTheme.actionHover : AppTheme.actionSurface
+                    color: searchInput.activeFocus ? "#ffffff" : shell.artworkCanvasActive ? "transparent" : searchField.expanded ? AppTheme.floatingSurface : AppTheme.actionSurface
                     border.width: searchInput.activeFocus ? 1 : 0
                     border.color: AppTheme.actionBorder
                     Behavior on width { NumberAnimation { duration: AppTheme.duration(320); easing.type: Easing.OutCubic } }
                     Behavior on height { enabled: shell.animationsEnabled; SpringAnimation { spring: 3.2; damping: .78; epsilon: .1 } }
                     Loader {
                         anchors.fill: parent
-                        active: shell.artworkCanvasActive
+                        active: shell.artworkCanvasActive && !searchInput.activeFocus
                         sourceComponent: GlassSurface {
                             // Sample only the artist canvas, excluding this field
                             // and the toolbar to avoid recursive self-sampling.
@@ -1104,7 +1113,7 @@ Item {
                         }
                     }
                     MouseArea { x: 0; y: 0; width: 32; height: 32; onClicked: searchField.submit()
-                        IconGlyph { objectName: "integratedSearchIcon"; anchors.centerIn: parent; width: 14; height: 14; kind: "search"; glyphColor: AppTheme.canvasText }
+                        IconGlyph { objectName: "integratedSearchIcon"; anchors.centerIn: parent; width: 14; height: 14; kind: "search"; glyphColor: searchInput.activeFocus ? "#20262b" : AppTheme.canvasText }
                     }
                     // The expanded field owns wheel/hit tests beneath the header.
                     MouseArea { anchors.fill: parent; z: -1; acceptedButtons: Qt.AllButtons; onWheel: wheel => wheel.accepted = true }
@@ -1114,8 +1123,9 @@ Item {
                         x: 33
                         y: 0; width: searchCapsule.width-x-12; height: 32
                         verticalAlignment: Text.AlignVCenter
-                        color: AppTheme.canvasText; font.family: AppTheme.fontFamily; font.pixelSize: 12; clip: true
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: shell.searchPlaceholder(); color: AppTheme.canvasSecondary; visible: !searchInput.text.length; font.pixelSize: 12 }
+                        color: activeFocus ? "#000000" : AppTheme.canvasText; font.family: AppTheme.fontFamily; font.pixelSize: 12; clip: true
+                        selectionColor: "#c3dbff"; selectedTextColor: "#000000"
+                        Text { anchors.verticalCenter: parent.verticalCenter; text: shell.searchPlaceholder(); color: searchInput.activeFocus ? "#646b73" : AppTheme.canvasSecondary; visible: !searchInput.text.length; font.pixelSize: 12 }
                         onTextChanged: { searchField.suggestionIndex=-1; if(shell.settingsOpen)shell.settingsSearchQuery=text;else { if(!shell.onlineSearchScope)shell.pageSearchQuery=text.trim(); suggestionDelay.restart() } }
                         onActiveFocusChanged: { if(activeFocus)suggestionDelay.restart();else {suggestionDelay.stop();searchField.suggestionIndex=-1} }
                         Keys.onDownPressed: if(searchField.expanded)searchField.suggestionIndex=Math.min(searchField.suggestions.length-1,searchField.suggestionIndex+1)
@@ -1136,8 +1146,8 @@ Item {
                                 required property int index
                                 required property string modelData
                                 width: searchCapsule.width-12; height: 36; radius: 10
-                                color: suggestionHover.hovered || searchField.suggestionIndex===index ? AppTheme.controlHover : "transparent"
-                                Text { x: 9; anchors.verticalCenter: parent.verticalCenter; width: parent.width-18; text: suggestionRow.modelData; elide: Text.ElideRight; color: shell.artworkCanvasActive ? AppTheme.canvasText : AppTheme.textPrimary; font.family: AppTheme.fontFamily; font.pixelSize: 12 }
+                                color: suggestionHover.hovered || searchField.suggestionIndex===index ? "#edf1f5" : "transparent"
+                                Text { x: 9; anchors.verticalCenter: parent.verticalCenter; width: parent.width-18; text: suggestionRow.modelData; elide: Text.ElideRight; color: "#20262b"; font.family: AppTheme.fontFamily; font.pixelSize: 12 }
                                 HoverHandler { id: suggestionHover }
                                 MouseArea { anchors.fill: parent; onClicked: {shell.runSearch(suggestionRow.modelData);searchInput.focus=false} }
                             }

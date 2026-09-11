@@ -2,7 +2,7 @@
   #error StageDir is required
 #endif
 #ifndef ReleaseVersion
-  #define ReleaseVersion "0.3.1"
+  #define ReleaseVersion "0.3.2"
 #endif
 [Setup]
 AppId={{C9DFBE62-EA54-44D9-AE71-378F2715325D}
@@ -35,8 +35,8 @@ Name: desktopicon; Description: "创建桌面快捷方式"; Flags: unchecked
 Source: "{#StageDir}\*"; DestDir: "{app}"; Excludes: "portable.mode"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\ListenFree"; Filename: "{app}\listenfree.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\ListenFree"; Filename: "{app}\listenfree.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\ListenFree"; Filename: "{app}\listenfree.exe"; WorkingDir: "{app}"; AppUserModelID: "ListenFree.Desktop"
+Name: "{autodesktop}\ListenFree"; Filename: "{app}\listenfree.exe"; WorkingDir: "{app}"; AppUserModelID: "ListenFree.Desktop"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\listenfree.exe"; Description: "启动 ListenFree"; Flags: nowait postinstall skipifsilent

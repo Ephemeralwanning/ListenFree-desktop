@@ -1,5 +1,6 @@
 #include "folia_scene.h"
 #include "fume_layout.h"
+#include "diorama_geometry.h"
 #include <QTextLayout>
 #include <QTextBoundaryFinder>
 #include <QFontMetricsF>
@@ -53,8 +54,8 @@ void FoliaScene::setLyrics(const QVariantList& v){if(v==lyrics_)return;lyrics_=v
 void FoliaScene::setStyle(const QString& v){if(v==style_)return;style_=v;model_.sync({});compile();emit styleChanged();}
 void FoliaScene::setSeed(const QString& v){if(seed_==v)return;seed_=v;compile();emit lyricsChanged();}
 void FoliaScene::setFontFamily(const QString& v){if(v==family_)return;family_=v;compile();emit lyricsChanged();}
-void FoliaScene::setReducedMotion(bool v){if(v==reduced_)return;reduced_=v;emit frameChanged();}
-void FoliaScene::setWordTiming(bool v){if(v==timed_)return;timed_=v;emit frameChanged();}
+void FoliaScene::setReducedMotion(bool v){if(v==reduced_)return;reduced_=v;updateDioramaCamera();emit frameChanged();}
+void FoliaScene::setWordTiming(bool v){if(v==timed_)return;timed_=v;updateDioramaCamera();emit frameChanged();}
 void FoliaScene::setEnergy(qreal v){if(qFuzzyCompare(energy_,v))return;energy_=sat(v);emit frameChanged();}
 void FoliaScene::setAccentColor(const QColor& v){if(!v.isValid()||v==accent_)return;accent_=v;emit accentColorChanged();emit frameChanged();}
 void FoliaScene::resetArtworkAccent(){++artworkGeneration_;setAccentColor(QColor("#ddd9d3"));}
@@ -90,7 +91,7 @@ void FoliaScene::setPosition(qreal v){
     if(!std::isfinite(v))return;position_=v;
     const int next=int(std::upper_bound(lines_.cbegin(),lines_.cend(),v,[](qreal t,const Line& l){return t<l.start;})-lines_.cbegin())-1;
     if(current_!=next){current_=next;rebuildWindow();emit currentChanged();}
-    emit frameChanged();
+    updateDioramaCamera();emit frameChanged();
 }
 QString FoliaScene::translation()const{return current_>=0&&current_<lines_.size()?lines_[current_].translation:QString{};}
 QString FoliaScene::shotName()const{return current_<0?QString{}:style_=="diorama"?shots[lines_[current_].shot%13]:style_=="sonnet"?sonnetShots[lines_[current_].shot%7]:style_;}
@@ -108,7 +109,7 @@ qreal FoliaScene::cameraIndex()const{
     return reduced_?current_:current_-1+out((position_-lines_[current_].start)/duration);
 }
 void FoliaScene::compile(){
-    lines_.clear();if(width()<1||height()<1)return;
+    ++geometryRevision_;camera_.valid=false;lines_.clear();if(width()<1||height()<1)return;
     QVector3D origin(0,0,0),forward(0,0,1),right(1,0,0),up(0,-1,0);
     for(int i=0;i<lyrics_.size();++i){
         const auto source=lyrics_[i].toMap();Line line;
@@ -165,7 +166,7 @@ void FoliaScene::compile(){
         lines_.append(line);
     }
     current_=int(std::upper_bound(lines_.cbegin(),lines_.cend(),position_,[](qreal t,const Line& l){return t<l.start;})-lines_.cbegin())-1;
-    rebuildWindow();emit currentChanged();emit frameChanged();
+    updateDioramaCamera();rebuildWindow();emit currentChanged();emit frameChanged();
 }
 QVariantMap FoliaScene::nodeFor(int i,int g,int kind)const{
     const auto& line=lines_[i];QVariantMap n{{"key",style_+":"+QString::number(i)+":"+QString::number(kind)+":"+QString::number(g)},{"line",i},{"glyph",g},{"kind",kind},{"fontSize",line.font},{"width",line.w+32},{"height",line.h+26}};
@@ -188,48 +189,107 @@ void FoliaScene::rebuildWindow(){
     }
     model_.sync(rows);
 }
+qreal FoliaScene::dioramaUnit(const Line& line)const{
+    const qreal unit=.68/std::max(1.,line.font);
+    return unit*std::min(1.,6.5/std::max(.01,line.w*unit));
+}
+void FoliaScene::updateDioramaCamera(){
+    camera_.valid=false;if(style_!="diorama"||lines_.isEmpty())return;
+    const int b=std::clamp(current_,0,int(lines_.size())-1),a=std::max(0,b-1);
+    struct Rig {QVector3D eye,target,down;qreal roll=0,distance=5.2;};
+    const auto rig=[&](int index,qreal time){
+        const auto& line=lines_[index];
+        const qreal end=index+1<lines_.size()?lines_[index+1].start:line.end;
+        const qreal p=reduced_?.5:sat((time-line.start)/std::max(100.,end-line.start));
+        const qreal e=smoothStep(p),dir=randomUnit(seed_,index*17+2)<.5?-1:1;
+        // Fit to the narrower field of view, including a portrait window. A
+        // close shot still leaves room for the complete multi-row lyric plane.
+        const qreal unit=dioramaUnit(line),tanFov=std::tan(55*pi/360.);
+        const qreal fitDistance=std::max(line.w*unit/(2*tanFov*(width()/height())*.76),line.h*unit/(2*tanFov*.64));
+        const qreal hero=std::max(5.2,fitDistance/.72);
+        qreal back=hero,side=0,lift=.35,roll=0;
+        // Folia cameraPath.resolveShotOffset, adapted to a screen-down basis.
+        if(!reduced_)switch(line.shot%13){
+        case 0:back=hero*(1.5-.8*e);lift=.6-.25*e;break;
+        case 1:back=hero*(.85+1.15*e);lift=.5+1.7*e;break;
+        case 2:{const auto theta=dir*.55*(2*e-1);side=hero*std::sin(theta);back=hero*std::cos(theta);lift=.9;break;}
+        case 3:side=dir*hero*.34*std::sin(pi*p);back=hero*1.06;lift=.62;break;
+        case 4:lift=dir>0?mix(-1.5,2.4,e):mix(2.4,-1.4,e);back=hero*1.05;break;
+        case 5:lift=.5+.3*std::sin(p*pi);break;
+        case 6:side=hero*std::sin(dir*.4*e)*1.1;back=hero*(1+.35*e);lift=.8+1.2*e;break;
+        case 7:side=hero*std::sin(dir*.7*(2*e-1))*.85;back=hero*(1.05-.1*e);lift=-.3+2.4*e;roll=dir*mix(-5.,5.,e);break;
+        case 8:side=dir*hero*.45*(2*e-1);lift=1.4-.9*std::sin(pi*e);back=hero*1.02;roll=dir*mix(3.,-3.,e);break;
+        case 9:side=dir*hero*(.7-1.4*e);back=hero*(.78+.12*std::sin(pi*e));lift=.55;break;
+        case 10:side=dir*hero*.16*std::sin(e*pi*2);lift=1.1+.5*std::sin(e*pi*2+1);back=hero*(1.05+.06*std::sin(e*pi));break;
+        case 11:side=dir*hero*.22*e;lift=.5+1.4*e;back=hero*(1.15-.25*e);break;
+        case 12:{const auto theta=dir*.5*std::sin(pi*e);side=hero*std::sin(theta)*1.3;back=hero*(1.05+.12*(1-std::cos(theta)));lift=.5+.5*std::sin(pi*e);break;}}
+        qreal head=0;
+        if(!reduced_&&timed_){
+            qreal total=0;for(const auto& glyph:line.glyphs){if(!glyph.timed)continue;
+                const qreal d=time<glyph.start?glyph.start-time:time>glyph.end?time-glyph.end:0;
+                const qreal weight=std::exp(-d*d/245000.);head+=(glyph.x+glyph.w/2-line.w/2)*unit*weight;total+=weight;}
+            head=total>0?head/total*.18:0;
+        }
+        const qreal clock=reduced_?0:time/1000.,phase=randomUnit(seed_,91)*pi*2;
+        const qreal drift=reduced_?0:std::sin(clock*.17+phase)*.10;
+        Rig result;result.target=line.origin+line.right*float(head);
+        result.eye=result.target-line.forward*float(back)+line.right*float(side+drift)-line.up*float(lift);
+        result.down=line.up;result.roll=roll;result.distance=back;return result;
+    };
+    const auto incoming=rig(b,position_);auto shot=incoming;
+    if(a!=b&&!reduced_){
+        // Evaluate the outgoing shot at the exact boundary, not at the new
+        // line's progress. This removes the old discontinuity in side/roll.
+        const auto outgoing=rig(a,lines_[b].start);
+        const qreal end=b+1<lines_.size()?lines_[b+1].start:lines_[b].end;
+        const qreal duration=std::min(1400.,std::max(80.,(end-lines_[b].start)*.38));
+        const qreal t=smoothStep((position_-lines_[b].start)/duration);
+        const qreal arc=std::sin(pi*t)*std::sin(pi*t);
+        shot.eye=outgoing.eye*(1-t)+incoming.eye*t-lines_[b].up*float(arc*.42);
+        shot.target=outgoing.target*(1-t)+incoming.target*t;
+        shot.down=(outgoing.down*(1-t)+incoming.down*t).normalized();
+        shot.roll=mix(outgoing.roll,incoming.roll,t);shot.distance=mix(outgoing.distance,incoming.distance,t);
+    }
+    auto& camera=camera_;camera.eye=shot.eye;camera.forward=(shot.target-shot.eye).normalized();
+    const auto right=QVector3D::crossProduct(camera.forward,shot.down).normalized();
+    const auto down=QVector3D::crossProduct(right,camera.forward).normalized();
+    const qreal roll=shot.roll*pi/180.;
+    camera.right=right*float(std::cos(roll))-down*float(std::sin(roll));
+    camera.down=right*float(std::sin(roll))+down*float(std::cos(roll));
+    camera.focal=height()/(2*std::tan(55*pi/360.));camera.distance=shot.distance;
+    camera.view.setRow(0,QVector4D(camera.right,-QVector3D::dotProduct(camera.right,camera.eye)));
+    camera.view.setRow(1,QVector4D(camera.down,-QVector3D::dotProduct(camera.down,camera.eye)));
+    camera.view.setRow(2,QVector4D(camera.forward,-QVector3D::dotProduct(camera.forward,camera.eye)));
+    camera.view.setRow(3,QVector4D(0,0,0,1));camera.valid=true;
+}
+QVariantMap FoliaScene::inspectCamera()const{
+    if(!camera_.valid)return {};
+    return {{"eye",QVariant::fromValue(camera_.eye)},{"right",QVariant::fromValue(camera_.right)},
+        {"down",QVariant::fromValue(camera_.down)},{"forward",QVariant::fromValue(camera_.forward)},
+        {"view",QVariant::fromValue(camera_.view)},{"focal",camera_.focal}};
+}
 FoliaPose FoliaScene::dioramaPose(const QVariantMap& node)const{
+    FoliaPose pose;if(!camera_.valid){pose.alpha=0;return pose;}
     const int i=node.value("line").toInt(),g=node.value("glyph").toInt();const auto& line=lines_[i];const auto& glyph=line.glyphs[g];
-    const int a=std::max(0,current_-1),b=std::max(0,current_);const qreal blend=smoothStep(cameraIndex()-a);
-    const auto& old=lines_[a];const auto& focus=lines_[b];const qreal p=progress(b);
-    QVector3D forward=(old.forward*(1-blend)+focus.forward*blend).normalized();
-    QVector3D right=(old.right*(1-blend)+focus.right*blend).normalized(),up=QVector3D::crossProduct(right,forward).normalized();
-    QVector3D target=old.origin*(1-blend)+focus.origin*blend;
-    qreal distance=5.2,side=0,lift=0,roll=0;
-    if(!reduced_)switch(focus.shot%13){
-    case 0:distance=mix(6.1,4.9,p);break;case 1:distance=mix(4.8,6.4,p);break;
-    case 2:side=std::sin(p*pi*1.2)*1.1;distance=5.6;break;
-    case 3:side=mix(-.7,.7,p);break;case 4:lift=mix(-.55,.55,p);break;
-    case 5:distance=5.6;break;case 6:distance=5.7-.65*std::sin(p*pi);break;
-    case 7:side=std::sin(p*pi*2)*.55;lift=std::cos(p*pi*2)*.3;roll=std::sin(p*pi*2)*3;break;
-    case 8:side=std::sin(p*pi*2)*.7;roll=std::sin(p*pi*2)*2;break;
-    case 9:side=mix(-1.,1.,p);distance=5.8;break;
-    case 10:lift=std::sin(p*pi)*.35;distance=5.8;break;
-    case 11:side=mix(-.4,.5,p);lift=mix(.3,-.2,p);break;
-    case 12:side=std::sin(p*pi)*.8;lift=std::cos(p*pi)*.3;break;}
-    // Read-head follows word timing, gently. Camera travel never depends on FFT.
-    qreal head=0,total=0;for(const auto& c:focus.glyphs){const qreal d=position_<c.start?c.start-position_:position_>c.end?position_-c.end:0;const qreal w=std::exp(-d*d/245000.);head+=(c.x+c.w/2-focus.w/2)*w;total+=w;}
-    if(total>0)target+=right*float(head/total*std::min(.008,.7/std::max(1.,focus.w)));
-    QVector3D camera=target-forward*float(distance)+right*float(side)+up*float(lift);
-    const QVector3D look=(target-camera).normalized();right=QVector3D::crossProduct(look,up).normalized();up=QVector3D::crossProduct(right,look).normalized();
-    const qreal unit=.62/std::max(1.,line.font),fit=std::min(1.,6.5/std::max(.01,line.w*unit));
-    const auto world=line.origin+line.right*float((glyph.x+glyph.w/2-line.w/2)*unit*fit)+line.up*float((glyph.y+line.font*.7-line.h/2)*unit*fit);
-    const auto relative=world-camera;const qreal z=QVector3D::dotProduct(relative,look);FoliaPose pose;
+    const auto& camera=camera_;const qreal unit=dioramaUnit(line);
+    const auto world=line.origin+line.right*float((glyph.x+glyph.w/2-line.w/2)*unit)+line.up*float((glyph.y+line.font*.7-line.h/2)*unit);
+    const auto relative=world-camera.eye;const qreal z=QVector3D::dotProduct(relative,camera.forward);
     if(z<=.3){pose.alpha=0;return pose;}
-    const qreal focal=height()/(2*std::tan(55*pi/360.));const auto screen=rotated(QVector3D::dotProduct(relative,right)*focal/z,QVector3D::dotProduct(relative,up)*focal/z,roll*pi/180.);
+    const qreal focal=camera.focal;const QPointF screen(QVector3D::dotProduct(relative,camera.right)*focal/z,QVector3D::dotProduct(relative,camera.down)*focal/z);
     pose.x=width()/2+screen.x()-glyph.w/2;pose.y=height()*.47+screen.y()-line.font*.7;
-    pose.scale=unit*fit*focal/z;pose.depth=-z;
-    pose.alpha=smoothStep((40-z)/8)*smoothStep((z-.9)/1.1)*(i==current_?1:.34);
-    pose.defocus=i==current_?0:std::min(8.,std::abs(z-distance)*.5);
-    pose.yaw=std::asin(std::clamp(qreal(QVector3D::dotProduct(line.right,look)),-1.,1.))*180/pi;
-    pose.pitch=-std::asin(std::clamp(qreal(QVector3D::dotProduct(line.up,look)),-1.,1.))*180/pi;
-    pose.rotation=roll+std::atan2(QVector3D::dotProduct(line.right,up),QVector3D::dotProduct(line.right,right))*180/pi;
+    pose.scale=unit*focal/z;pose.depth=-z;
+    pose.alpha=smoothStep((40-z)/8)*smoothStep((z-.9)/1.1)*(i==current_?1:.23);
+    pose.defocus=i==current_?0:std::min(8.,std::abs(z-camera.distance)*.5);
+    pose.yaw=std::asin(std::clamp(qreal(QVector3D::dotProduct(line.right,camera.forward)),-1.,1.))*180/pi;
+    pose.pitch=-std::asin(std::clamp(qreal(QVector3D::dotProduct(line.up,camera.forward)),-1.,1.))*180/pi;
+    pose.rotation=std::atan2(QVector3D::dotProduct(line.right,camera.down),QVector3D::dotProduct(line.right,camera.right))*180/pi;
     const bool timed=timed_&&glyph.timed;const qreal glow=timed?envelope(position_,glyph.start,glyph.end):1.;
     pose.light=glow;pose.alpha*=timed?(.5+.5*smoothStep((position_-glyph.start)/160.)):1.;
     const qreal after=position_-glyph.end;
     // Upstream soul hand-off: no detached copy while the word is still sung.
     if(timed&&after>=0&&!reduced_){const qreal flight=smoothStep(after/500.);pose.ghost=.6*std::exp(-after/600.)*flight;pose.lift=-line.font*.5*flight;pose.ghostScale=1+.3*flight;}
-    pose.color=QColor::fromRgbF(mix(.91,1.,glow),mix(.93,.87,glow),mix(.96,.74,glow));return pose;
+    const qreal reveal=timed?smoothStep((position_-glyph.start)/140.):1.;
+    pose.color=blendColor(QColor("#f2eee9"),accent_,reveal*.88,1.);return pose;
 }
 FoliaPose FoliaScene::pose(const QVariantMap& n)const{
     FoliaPose v;const int i=n.value("line").toInt(),gi=n.value("glyph").toInt(),kind=n.value("kind").toInt();
@@ -388,6 +448,53 @@ QSGNode* ImmersiveSpectrumItem::updatePaintNode(QSGNode* old,UpdatePaintNodeData
 }
 void FoliaDecorItem::setScene(FoliaScene* value){if(scene_==value)return;if(scene_)disconnect(scene_,nullptr,this,nullptr);scene_=value;if(scene_)connect(scene_,&FoliaScene::frameChanged,this,[this]{update();});update();emit sceneChanged();}
 QSGNode* FoliaDecorItem::updatePaintNode(QSGNode* old,UpdatePaintNodeData*){
+    if(scene_&&scene_->style_=="diorama"){
+        auto* node=dynamic_cast<diorama::Node*>(old);if(!node){delete old;node=new diorama::Node;}
+        const auto& s=*scene_;const int focus=std::max(0,s.current_);
+        const int first=std::max(0,focus-2),last=std::min(int(s.lines_.size())-1,focus+4);
+        const QSizeF size(width(),height());
+        if(node->owner!=scene_||node->revision!=s.geometryRevision_||node->first!=first||node->last!=last||node->size!=size){
+            node->owner=scene_;node->revision=s.geometryRevision_;node->first=first;node->last=last;node->size=size;
+            QVector<diorama::Particle> points;points.reserve(24000);
+            struct Cluster {diorama::Shape shape;QVector3D anchor;int line;};QVector<Cluster> candidates;
+            // Include two predecessors for stable cross-line clearance. Every
+            // candidate tests the same earlier anchors regardless of the
+            // mounted window; seeking cannot reshuffle a visible formation.
+            for(int i=std::max(0,first-2);i<=last;++i){const auto& l=s.lines_[i];
+                const auto shapes=diorama::formation(l.shot,FumeLayout::hash(s.seed_+QString::number(i)),l.w*s.dioramaUnit(l)/2);
+                for(const auto& shape:shapes){const auto p=shape.center;
+                    candidates.append({shape,l.origin+l.right*p.x()+l.up*p.y()+l.forward*p.z(),i});}
+            }
+            for(int c=0;c<candidates.size();++c){const auto& cluster=candidates[c];if(cluster.line<first)continue;
+                const auto& shape=cluster.shape;bool hidden=false;
+                const auto radius=[](const diorama::Shape& shape){return shape.scale*std::max(.8,shape.stretch*.55)*1.18;};
+                for(int earlier=0;earlier<c;++earlier){const auto& other=candidates[earlier];
+                    if(other.line>=cluster.line||other.line<cluster.line-2)continue;
+                    if((cluster.anchor-other.anchor).length()<(radius(shape)+radius(other.shape))*1.12){hidden=true;break;}}
+                if(hidden)continue;
+                const auto& l=s.lines_[cluster.line];const auto spin=QQuaternion::fromAxisAndAngle(QVector3D(0,1,0),shape.phase*180/pi);
+                const auto surface=diorama::surface(shape.kind,shape.stretch);
+                for(const auto& point:surface){const auto p=spin.rotatedVector(point)*float(shape.scale);
+                    points.append({l.right*p.x()+l.up*p.y()+l.forward*p.z(),cluster.anchor,shape.phase,shape.color});}
+            }
+            node->upload(points);
+        }
+        auto* material=static_cast<diorama::Material*>(node->material());material->view=s.camera_.view;
+        material->viewport=QVector4D(width(),height(),s.camera_.focal,s.position_/1000.);
+        material->controls=QVector4D(s.camera_.valid?s.energy_:0,s.reduced_?0:1,s.camera_.distance,1);
+        material->accent=QVector4D(s.accent_.redF(),s.accent_.greenF(),s.accent_.blueF(),1);
+        material->focusRect=QVector4D(-10000,-10000,1,1);
+        if(s.current_>=0&&s.camera_.valid){const auto& l=s.lines_[s.current_];const qreal unit=s.dioramaUnit(l);QRectF bounds;
+            bool valid=true;
+            for(int corner=0;corner<4;++corner){const auto world=l.origin+l.right*float((corner%2?1:-1)*l.w*unit/2)+l.up*float((corner/2?1:-1)*l.h*unit/2);
+                const auto point=s.camera_.view*QVector4D(world,1);if(point.z()<.9){valid=false;break;}
+                const QPointF screen(width()*.5+point.x()*s.camera_.focal/point.z(),height()*.47+point.y()*s.camera_.focal/point.z());
+                if(!corner)bounds=QRectF(screen,QSizeF(.01,.01));else bounds=bounds.united(QRectF(screen,QSizeF(.01,.01)));}
+            if(valid)material->focusRect=QVector4D(float(bounds.center().x()),float(bounds.center().y()),float(bounds.width()/2+20),float(bounds.height()/2+18));
+        }
+        node->markDirty(QSGNode::DirtyMaterial);return node;
+    }
+    if(dynamic_cast<diorama::Node*>(old)){delete old;old=nullptr;}
     auto* node=static_cast<QSGGeometryNode*>(old);if(!node){node=new QSGGeometryNode;node->setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),0));node->geometry()->setDrawingMode(QSGGeometry::DrawTriangles);node->setFlag(QSGNode::OwnsGeometry);node->setMaterial(new QSGVertexColorMaterial);node->setFlag(QSGNode::OwnsMaterial);}
     struct Vertex{float x,y;unsigned char r,g,b,a;};QVector<Vertex> vertices;vertices.reserve(18000);
     const auto triangle=[&](QPointF a,QPointF b,QPointF c,QColor color){const int alpha=color.alpha();for(const auto& p:{a,b,c})vertices.append({float(p.x()),float(p.y()),(unsigned char)(color.red()*alpha/255),(unsigned char)(color.green()*alpha/255),(unsigned char)(color.blue()*alpha/255),(unsigned char)alpha});};
@@ -400,7 +507,6 @@ QSGNode* FoliaDecorItem::updatePaintNode(QSGNode* old,UpdatePaintNodeData*){
         for(int side:{-1,1}){const auto ai=a+inner*side,bi=b+inner*side,ao=a+outer*side,bo=b+outer*side;
             vertex(ai,color.alpha());vertex(bi,color.alpha());vertex(ao,0);vertex(bi,color.alpha());vertex(bo,0);vertex(ao,0);}
     };
-    const auto dot=[&](QPointF p,qreal size,QColor color){const QPointF a=p-QPointF(size,size),b=p+QPointF(size,-size),c=p+QPointF(size,size),d=p+QPointF(-size,size);triangle(a,b,c,color);triangle(a,c,d,color);};
     if(scene_&&scene_->current_>=0){
         const auto& s=*scene_;const qreal w=width(),h=height();const auto style=s.style_;
         if(style=="claddagh"){
@@ -418,22 +524,6 @@ QSGNode* FoliaDecorItem::updatePaintNode(QSGNode* old,UpdatePaintNodeData*){
             const qreal r=std::min(w,h)*.36;
             for(int k=-70;k<=70;k++){const qreal a=k*pi/90.,radius=r*(k%5==0?.91:.96);line({std::cos(a)*radius,h*.47+std::sin(a)*radius},{std::cos(a)*r,h*.47+std::sin(a)*r},k%5==0?1.2:.6,QColor(210,225,232,k%5==0?65:30));}
             const qreal angle=s.reduced_?0:std::sin(s.position_/1000.*2)*.08;line({0,h*.47},{std::cos(angle)*r*.85,h*.47+std::sin(angle)*r*.85},1.3,QColor(221,225,230,55));
-        }else if(style=="diorama"){
-            const auto& focus=s.lines_[s.current_];const int previousIndex=std::max(0,s.current_-1);const auto& prev=s.lines_[previousIndex];const qreal t=smoothStep(s.cameraIndex()-previousIndex);
-            const auto origin=prev.origin*(1-t)+focus.origin*t,forward=(prev.forward*(1-t)+focus.forward*t).normalized(),right=(prev.right*(1-t)+focus.right*t).normalized(),up=QVector3D::crossProduct(right,forward).normalized();
-            const auto camera=origin-forward*5.6f;const qreal focal=h/(2*std::tan(55*pi/360.));
-            const auto project=[&](QVector3D world,QPointF& pixel,qreal& depth){const auto r=world-camera;depth=QVector3D::dotProduct(r,forward);if(depth<=.9||depth>40)return false;pixel={w/2+QVector3D::dotProduct(r,right)*focal/depth,h*.47+QVector3D::dotProduct(r,up)*focal/depth};return pixel.x()>-100&&pixel.x()<w+100&&pixel.y()>-100&&pixel.y()<h+100;};
-            for(int i=std::max(0,s.current_-1);i<std::min(int(s.lines_.size()),s.current_+5);++i){const auto& l=s.lines_[i];const int family=l.shot%5;
-                for(int j=0;j<280;j++){const qreal u=qreal(j%70)/70.,v=qreal(j/70)/4.;qreal x=0,y=0,z=0;
-                    if(family==0){const qreal a=u*2*pi;x=std::cos(a)*(4.+v*.5);y=std::sin(a)*(2.1+v*.4);z=v*2;}
-                    else if(family==1){x=j%2?4.4:-4.4;y=(u-.5)*6;z=v*4;}
-                    else if(family==2){x=j%2?4.2:-4.2;y=(u-.5)*5;z=std::floor(v*4)*1.6;}
-                    else if(family==3){const qreal a=u*pi;x=std::cos(a)*4.8;y=-std::sin(a)*3;z=v*3;}
-                    else {const qreal a=u*4*pi+v*pi/2;x=std::cos(a)*4.6;y=std::sin(a)*2.7;z=u*6;}
-                    QPointF p;qreal depth;const auto world=l.origin+l.right*float(x)+l.up*float(y)+l.forward*float(z);
-                    if(project(world,p,depth)){const qreal fade=smoothStep((40-depth)/13)*smoothStep((depth-1)/2);QColor color(179,203,224);color.setAlphaF(std::clamp(fade*(.12+s.energy_*.14),0.,.3));dot(p,std::clamp(4./depth,.4,1.2),color);}
-                }
-            }
         }else if(style=="sonnet"){
             const int kind=s.lines_[s.current_].shot%7;const qreal p=s.progress(s.current_),enter=s.reduced_?1:out(p*5);QColor ink(214,203,184,int(75*enter));
             for(int i=0;i<4;i++){const qreal x=i%2?w*.91:w*.09,y=i/2?h*.87:h*.13;line({x,y},{x+(i%2?-1:1)*w*.04,y},1,ink);line({x,y},{x,y+(i/2?-1:1)*h*.06},1,ink);}

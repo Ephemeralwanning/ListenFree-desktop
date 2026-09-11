@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
@@ -68,6 +69,7 @@ const std::array migrations{
     Migration{3,
               {QStringLiteral("CREATE TABLE IF NOT EXISTS library_folders (folder_id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL UNIQUE COLLATE NOCASE, added_ms INTEGER NOT NULL DEFAULT 0)")}},
     Migration{4, {QStringLiteral("CREATE TABLE IF NOT EXISTS duplicate_aliases (path TEXT PRIMARY KEY, keeper_id TEXT NOT NULL REFERENCES tracks(track_id) ON DELETE CASCADE, keeper_path TEXT NOT NULL, hash TEXT NOT NULL, size_bytes INTEGER NOT NULL, modified_ms INTEGER NOT NULL)")}},
+    Migration{5, {QStringLiteral("CREATE TABLE IF NOT EXISTS library_exclusions (path TEXT PRIMARY KEY COLLATE NOCASE)")}},
 };
 
 void rollback(QSqlDatabase& database) {
@@ -90,7 +92,7 @@ QString libraryPrefixPattern(const QString& path) {
     escaped.replace(QStringLiteral("\\"), QStringLiteral("\\\\"))
         .replace(QStringLiteral("%"), QStringLiteral("\\%"))
         .replace(QStringLiteral("_"), QStringLiteral("\\_"));
-    return escaped + QStringLiteral("/%");
+    return escaped + (escaped.endsWith('/') ? QStringLiteral("%") : QStringLiteral("/%"));
 }
 
 void hydrateRelations(const QSqlDatabase& database, domain::Track& track) {
@@ -325,12 +327,26 @@ UpsertStatements::UpsertStatements(QSqlDatabase& database)
             "track_id=excluded.track_id,size_bytes=excluded.size_bytes,modified_ms=excluded.modified_ms"));
 }
 
-bool Database::upsertTracks(std::span<const domain::Track> tracks) {
+bool Database::upsertTracks(std::span<const domain::Track> tracks, bool fromScan) {
     if (!isOpen()) return false;
     QSqlQuery begin(db_);
     if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
     UpsertStatements statements(db_);
+    QSqlQuery excluded(db_);
+    if(fromScan && !excluded.prepare("SELECT 1 FROM library_exclusions WHERE path=?")) { rollback(db_); return false; }
     for (const auto& track : tracks) {
+        if(fromScan && track.localPath) {
+            const auto path=QDir::cleanPath(QDir::fromNativeSeparators(QString::fromStdString(*track.localPath)));
+            // The file can be trashed after metadata was read but before this
+            // batch reaches the writer, including during a cancelled scan.
+            if(!QFileInfo(path).isFile())continue;
+            excluded.bindValue(0, path);
+            if(!excluded.exec()) { rollback(db_); return false; }
+            const bool skip = excluded.next(); excluded.finish();
+            // Check under the same write transaction, including batches that
+            // were read before the user removed this file from the library.
+            if(skip)continue;
+        }
         if (!upsertTrackRows(track, statements)) {
             rollback(db_);
             return false;
@@ -510,6 +526,9 @@ std::vector<application::LocalFileFingerprint> Database::loadLocalFiles() const 
             static_cast<std::uintmax_t>(aliases.value(1).toULongLong()),aliases.value(2).toLongLong(),
             aliases.value(3).toString().toStdString(),std::filesystem::path(aliases.value(4).toString().toStdWString())});
     }
+    QSqlQuery exclusions(db_);
+    if(exclusions.exec("SELECT path FROM library_exclusions"))while(exclusions.next())
+        result.push_back({std::filesystem::path(exclusions.value(0).toString().toStdWString()),0,0,{}, {},true});
     return result;
 }
 
@@ -780,5 +799,100 @@ bool Database::removeTrack(const QString& id) {
     query.prepare("DELETE FROM tracks WHERE track_id = ?");
     query.addBindValue(id);
     return query.exec();
+}
+bool Database::removeLocalTrack(const QString& path, bool excludeFromScan) {
+    if(path.isEmpty() || !db_.transaction())return false;
+    const QFileInfo file(path);
+    const auto canonical = file.canonicalFilePath();
+    const auto normalized = QDir::cleanPath(canonical.isEmpty()?file.absoluteFilePath():canonical);
+    QSqlQuery query(db_);
+    if(excludeFromScan) {
+        query.prepare("INSERT OR IGNORE INTO library_exclusions(path) VALUES(?)");query.addBindValue(normalized);
+        if(!query.exec()) { db_.rollback(); return false; }
+    }
+    query.prepare("DELETE FROM tracks WHERE replace(local_path,'\\','/')=? COLLATE NOCASE");
+    query.addBindValue(normalized);
+    if(!query.exec() || !db_.commit()) { db_.rollback(); return false; }
+    return true;
+}
+bool Database::restoreExcludedFiles(const QStringList& roots) {
+    if(!db_.transaction())return false;
+    QSqlQuery query(db_);
+    query.prepare("DELETE FROM library_exclusions WHERE path LIKE ? ESCAPE '\\'");
+    for(const auto& root:roots) {
+        const auto normalized = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
+        query.bindValue(0, libraryPrefixPattern(normalized));
+        if(!query.exec()) { db_.rollback(); return false; }
+    }
+    if(!db_.commit()) { db_.rollback(); return false; }
+    return true;
+}
+bool Database::pruneMissingLocalFiles(const QStringList& roots, bool recursive) {
+    QStringList subtreePrefixes;
+    QSet<QString> directDirectories;
+    const auto registered = loadLibraryFolders();
+    QStringList onlineParents;
+    for(const auto& value:registered) {
+        const auto parent=QDir::cleanPath(value.toList().value(1).toString());
+        if(QFileInfo(parent).isDir())onlineParents.append(parent.endsWith('/') ? parent : parent+'/');
+    }
+    for(const auto& raw:roots) {
+        const auto root=QDir::cleanPath(QFileInfo(raw).absoluteFilePath());
+        const bool exists=QFileInfo(root).isDir();
+        bool accessible=exists;
+        // A removed subdirectory is safe to reconcile while its registered
+        // root is online. A missing drive/root is not evidence of deletion.
+        for(const auto& prefix:onlineParents)
+            if(root.startsWith(prefix,Qt::CaseInsensitive))accessible=true;
+        if(!accessible)continue;
+        if(recursive || !exists)subtreePrefixes.append(root.endsWith('/') ? root : root+'/');
+        else directDirectories.insert(root.toCaseFolded());
+    }
+    if(subtreePrefixes.isEmpty() && directDirectories.isEmpty())return true;
+    QSqlQuery files(db_);
+    if(!files.exec("SELECT t.track_id,coalesce(l.canonical_path,t.local_path) FROM tracks t "
+                   "LEFT JOIN local_files l ON l.track_id=t.track_id WHERE t.local_path IS NOT NULL AND t.local_path<>''"))return false;
+    QList<QPair<QString,QString>> missing;
+    const auto absent=[](const QString& path) {
+        std::error_code error;
+        const auto status=std::filesystem::symlink_status(std::filesystem::path(path.toStdWString()),error);
+        return status.type()==std::filesystem::file_type::not_found
+            && (!error || error==std::errc::no_such_file_or_directory || error==std::errc::not_a_directory);
+    };
+    QHash<QString,bool> missingParents;
+    while(files.next()) {
+        const auto path=QDir::fromNativeSeparators(files.value(1).toString());
+        const auto parent=QFileInfo(path).absolutePath();
+        bool within=directDirectories.contains(parent.toCaseFolded());
+        for(const auto& prefix:subtreePrefixes) {
+            if(path.startsWith(prefix,Qt::CaseInsensitive)) { within=true;break; }
+        }
+        // At startup a deleted subtree has no watch left to report it. An
+        // existing ancestor's scan also removes records under missing folders.
+        if(!within && !directDirectories.isEmpty()) {
+            auto ancestor=QFileInfo(parent).absolutePath();
+            while(ancestor!=parent) {
+                if(directDirectories.contains(ancestor.toCaseFolded())) {
+                    if(!missingParents.contains(parent))missingParents.insert(parent,absent(parent));
+                    within=missingParents.value(parent);break;
+                }
+                const auto next=QFileInfo(ancestor).absolutePath();
+                if(next==ancestor)break;
+                ancestor=next;
+            }
+        }
+        if(within && absent(path))missing.emplaceBack(files.value(0).toString(),path);
+    }
+    files.finish();
+    if(missing.isEmpty())return true;
+    if(!db_.transaction())return false;
+    QSqlQuery remove(db_);remove.prepare("DELETE FROM tracks WHERE track_id=? AND replace(local_path,'\\','/')=? COLLATE NOCASE");
+    for(const auto& [id,path]:missing) {
+        if(!absent(path))continue;
+        remove.bindValue(0,id);remove.bindValue(1,path);
+        if(!remove.exec()) { db_.rollback(); return false; }
+    }
+    if(!db_.commit()) { db_.rollback(); return false; }
+    return true;
 }
 }

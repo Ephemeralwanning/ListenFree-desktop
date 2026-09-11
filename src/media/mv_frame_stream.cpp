@@ -65,7 +65,8 @@ struct MvFrameStream::Job {
     std::deque<QVideoFrame> frames;
     quint64 serial=0;
     qint64 seekMs=0,durationMs=0;
-    bool fallback=false;
+    bool fallback=false, eof=false;
+    qint64 lastEndUs=0;
     static qint64 now(){return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     void arm(){deadline=now()+12000;}
     static int interrupt(void* opaque){const auto* job=static_cast<Job*>(opaque);return job->cancelled || now()>job->deadline.load();}
@@ -79,7 +80,7 @@ void MvFrameStream::stop() {
     pump_.stop();
     if(job_){job_->cancelled=true;job_->wake.notify_all();}
     if(worker_.joinable())worker_.join();
-    job_.reset();ready_=false;lateClock_.invalidate();
+    job_.reset();ready_=false;endEmitted_=false;lateClock_.invalidate();
 }
 void MvFrameStream::open(const QUrl& url) {
     stop();job_=std::make_shared<Job>();anchorMs_=0;playing_=false;presented_=0;clock_.start();
@@ -92,13 +93,14 @@ void MvFrameStream::synchronize(qint64 positionMs,bool playing,bool seek) {
     anchorMs_=qMax(qint64(0),positionMs);playing_=playing;clock_.restart();
     if(seek && job_) {
         lateClock_.invalidate();
-        {std::lock_guard lock(job_->mutex);job_->seekMs=anchorMs_;++job_->serial;job_->frames.clear();}
+        endEmitted_=false;
+        {std::lock_guard lock(job_->mutex);job_->seekMs=anchorMs_;++job_->serial;job_->frames.clear();job_->eof=false;job_->lastEndUs=0;}
         job_->wake.notify_all();
     }
 }
 void MvFrameStream::drain() {
     if(!job_)return;
-    QVideoFrame frame;bool fallback=false;
+    QVideoFrame frame;bool fallback=false, ended=false;
     {
         std::lock_guard lock(job_->mutex);fallback=job_->fallback;
         const qint64 target=position()*1000;
@@ -107,6 +109,7 @@ void MvFrameStream::drain() {
         while(!job_->frames.empty() && job_->frames.front().startTime()<=target) {
             frame=std::move(job_->frames.front());job_->frames.pop_front();
         }
+        ended=playing_ && job_->eof && job_->frames.empty() && target>=job_->lastEndUs;
     }
     job_->wake.notify_all();
     if(fallback){pump_.stop();emit fallbackRequested();return;}
@@ -121,7 +124,9 @@ void MvFrameStream::drain() {
         ++presented_;emit frameReady(frame);
         if(!guard)return;
         if(!ready_){ready_=true;emit ready();}
+        if(!guard)return;
     }
+    if(ended && !endEmitted_){endEmitted_=true;emit finished();}
 }
 void MvFrameStream::decode(const std::shared_ptr<Job>& job,const QUrl& url) {
     const auto fallback=[&]{std::lock_guard lock(job->mutex);if(!job->cancelled)job->fallback=true;};
@@ -201,11 +206,11 @@ void MvFrameStream::decode(const std::shared_ptr<Job>& job,const QUrl& url) {
             if(pts+duration<=seekUs){av_frame_free(&decoded);continue;}
             QVideoFrame frame(std::make_unique<AvFrameBuffer>(decoded));frame.setStartTime(pts);frame.setEndTime(pts+duration);
             std::lock_guard lock(job->mutex);
-            if(job->serial==serial)job->frames.push_back(std::move(frame));
+            if(job->serial==serial){job->lastEndUs=frame.endTime();job->frames.push_back(std::move(frame));}
             continue;
         }
         av_frame_free(&decoded);
-        if(result==AVERROR_EOF){eof=true;continue;}
+        if(result==AVERROR_EOF){eof=true;std::lock_guard lock(job->mutex);if(job->serial==serial)job->eof=true;continue;}
         if(result!=AVERROR(EAGAIN)){fallback();return;}
         do {
             av_packet_unref(resource.packet);job->arm();result=av_read_frame(resource.format,resource.packet);

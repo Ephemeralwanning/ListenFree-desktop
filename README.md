@@ -34,8 +34,12 @@ Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng �
 安装 Inno Setup 6 和 7-Zip 后生成干净的安装版与便携 ZIP：
 
 ```powershell
-./scripts/windows/package-release.ps1 -Version 0.3.1
+./scripts/windows/package-release.ps1 -Version 0.3.2
 ```
+
+只生成便携 ZIP 时追加 `-PortableOnly`，无需安装 Inno Setup。0.3.2 的本地整合内容见 [更新说明](packaging/release-notes-0.3.2.txt)。
+
+使用已经验收的运行库目录可传入 `-RuntimeDirectory <目录>`；追加 `-SkipChecksums` 可只生成安装包和便携 ZIP，不生成校验文件。
 
 发行脚本只收集程序、运行库、使用说明和许可，排除个人数据与用户音源；输出目录必须是尚未生成过的版本目录，也可指定 OutputDirectory。
 

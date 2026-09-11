@@ -15,6 +15,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <io.h>
+#include <fcntl.h>
 #endif
 
 using listenfree::sourcehost::MessageType;
@@ -77,6 +78,11 @@ private:
 
 int main(int argc, char* argv[]) {
 #ifdef Q_OS_WIN
+    if (_setmode(_fileno(stdin), _O_BINARY) == -1 ||
+        _setmode(_fileno(stdout), _O_BINARY) == -1)
+        return 4;
+#endif
+#ifdef Q_OS_WIN
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #endif
     QCoreApplication app(argc, argv);
@@ -115,6 +121,7 @@ int main(int argc, char* argv[]) {
             return;
         }
         if (request.type == MessageType::Hello) {
+            if (faultMode == QStringLiteral("never-handshake")) return;
             SourceMessage ack;
             ack.type = MessageType::HelloAck;
             ack.requestId = faultMode == QStringLiteral("bad-handshake")

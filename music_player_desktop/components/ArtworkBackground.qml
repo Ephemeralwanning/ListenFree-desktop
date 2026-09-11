@@ -56,7 +56,7 @@ Item {
             Image {
                 id: original
                 anchors.fill: parent
-                source: background.artwork
+                source: AppTheme.textureUrl(background.artwork)
                 sourceSize: Qt.size(1024,1024)
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true; visible: false
@@ -99,7 +99,7 @@ Item {
             }
             Image {
                 id: meanImage
-                width: 20; height: 20; source: background.artwork
+                width: 20; height: 20; source: AppTheme.textureUrl(background.artwork)
                 sourceSize: Qt.size(20,20); fillMode: Image.Stretch
                 asynchronous: true; visible: false
             }
@@ -121,7 +121,7 @@ Item {
     Component {
         id: solidComponent
         Item {
-            Image { id: paletteImage; width: 64; height: 64; source: background.artwork; sourceSize: Qt.size(64, 64); asynchronous: true; visible: false; onStatusChanged: background.visualReady = status === Image.Ready }
+            Image { id: paletteImage; width: 64; height: 64; source: AppTheme.textureUrl(background.artwork); sourceSize: Qt.size(64, 64); asynchronous: true; visible: false; onStatusChanged: background.visualReady = status === Image.Ready }
             ShaderEffectSource {
                 id: paletteMotionSample
                 width: 64; height: 64
@@ -155,7 +155,7 @@ Item {
             Image {
                 id: coverImage
                 anchors.fill: parent
-                source: background.artwork
+                source: AppTheme.textureUrl(background.artwork)
                 sourceSize: Qt.size(1024, 1024)
                 asynchronous: true
                 onStatusChanged: background.visualReady = status === Image.Ready
@@ -196,7 +196,7 @@ Item {
             // small blur passes. Flow never reduces the artwork to a palette.
             readonly property int sampleSize: 128
             readonly property real blurScale: .55 + .65 * Math.max(0, Math.min(1, background.blurAmount / 100))
-            Image { id: texture; width: flowLayer.sampleSize; height: width; source: background.artwork; sourceSize: Qt.size(width, height); visible: false; asynchronous: true; onStatusChanged: background.visualReady = status === Image.Ready }
+            Image { id: texture; width: flowLayer.sampleSize; height: width; source: AppTheme.textureUrl(background.artwork); sourceSize: Qt.size(width, height); visible: false; asynchronous: true; onStatusChanged: background.visualReady = status === Image.Ready }
             ShaderEffectSource {
                 id: flowMotionSample
                 width: flowLayer.sampleSize; height: width
