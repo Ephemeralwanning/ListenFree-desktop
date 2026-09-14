@@ -43,4 +43,15 @@ Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng �
 
 发行脚本只收集程序、运行库、使用说明和许可，排除个人数据与用户音源；输出目录必须是尚未生成过的版本目录，也可指定 OutputDirectory。
 
+##页面样式
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223758" src="https://github.com/user-attachments/assets/43368130-ad05-42b8-bece-bd64ffb560d3" />
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223742" src="https://github.com/user-attachments/assets/13e8b7aa-8c05-4bf8-8363-b178deaf20e4" />
+
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223737" src="https://github.com/user-attachments/assets/b216891c-4633-48a8-be52-014b6e3437f9" />
+
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223728" src="https://github.com/user-attachments/assets/f378a956-d530-4ef4-8daf-dcb61616f5d8" />
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223717" src="https://github.com/user-attachments/assets/2125e502-2304-4652-b453-5d31210e7b36" />
+<img width="1599" height="1064" alt="屏幕截图 2026-09-14 223642" src="https://github.com/user-attachments/assets/1ed30d86-36f5-4fa5-90b0-905e4089a490" />
+
+
 src/、music_player_desktop/、ui/ 是应用与资源；tests/ 和 tools/ 保留构建引用的验证代码；patches/、scripts/、packaging/ 和 licenses/ 为依赖修改及打包输入。个人文档、开发规划、生成物和测试结果不进入仓库。组件归属与许可见 licenses/THIRD-PARTY-NOTICES.txt。
