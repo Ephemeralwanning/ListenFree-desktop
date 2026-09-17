@@ -10,6 +10,9 @@
 #include <QPointer>
 #include <QDir>
 #include <QFileInfo>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -777,5 +780,46 @@ SettingsController::SettingsController(application::ISettingsRepository& reposit
     : QObject(parent), repository_(&repository) {}
 
 SettingsController::~SettingsController() = default;
+
+QString SettingsController::localFilePath(const QUrl& url) const {
+    return url.isLocalFile() ? QDir::toNativeSeparators(url.toLocalFile()) : QString{};
+}
+
+QVariantMap SettingsController::resolveBackground(const QUrl& url, bool wallpaperProject) const {
+    const auto fail = [](const QString& error) { return QVariantMap{{"error", error}}; };
+    if (url.isEmpty()) return {};
+    if (!url.isLocalFile()) return fail(tr("请选择本地文件。"));
+    QFileInfo file(url.toLocalFile());
+    if (!file.isFile() || !file.isReadable()) return fail(tr("背景文件不存在或无法读取，请重新选择。"));
+    QString kind = "Video";
+    if (wallpaperProject) {
+        QFile project(file.absoluteFilePath());
+        if (file.size() > 1024 * 1024 || !project.open(QIODevice::ReadOnly))
+            return fail(tr("无法读取 Wallpaper 项目，或项目配置超过 1 MiB。"));
+        QJsonParseError error;
+        const auto document = QJsonDocument::fromJson(project.read(1024 * 1024 + 1), &error);
+        if (error.error != QJsonParseError::NoError || !document.isObject())
+            return fail(tr("项目配置无效，请选择 Wallpaper Engine 的 project.json。"));
+        const auto object = document.object();
+        const auto type = object.value("type").toString().toLower();
+        if (type != "video" && type != "image")
+            return fail(tr("此项目需要 Wallpaper Engine 渲染；当前仅支持本地视频和图片项目，暂不支持场景、网页或应用壁纸。"));
+        kind = type == "image" ? "Image" : "Video";
+        const auto relative = object.value("file").toString();
+        if (relative.isEmpty() || relative.contains(QChar::Null) || QDir::isAbsolutePath(relative) || !QUrl(relative).scheme().isEmpty())
+            return fail(tr("项目未提供有效的本地媒体路径。"));
+        const auto directory = file.absoluteDir();
+        file = QFileInfo(directory.filePath(relative));
+        const auto canonical = file.canonicalFilePath();
+        if (!file.isFile() || !file.isReadable() || !canonical.startsWith(directory.canonicalPath() + '/', Qt::CaseInsensitive))
+            return fail(tr("找不到项目内的媒体文件，请保留完整的壁纸目录。"));
+    }
+    const auto suffix = file.suffix().toLower();
+    const QStringList extensions = kind == "Image"
+        ? QStringList{"jpg", "jpeg", "png", "webp", "bmp"}
+        : QStringList{"mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv"};
+    if (!extensions.contains(suffix)) return fail(tr("此背景文件格式暂不支持，请选择常见图片或视频文件。"));
+    return {{"kind", kind}, {"source", QUrl::fromLocalFile(file.absoluteFilePath())}, {"error", QString{}}};
+}
 
 } // namespace listenfree::qmlbridge

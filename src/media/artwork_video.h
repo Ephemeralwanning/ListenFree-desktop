@@ -12,6 +12,7 @@ class ArtworkVideo final : public QObject {
     Q_PROPERTY(QUrl source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
+    Q_PROPERTY(QString errorString READ errorString NOTIFY errorChanged)
     Q_PROPERTY(bool bounded READ bounded NOTIFY readyChanged)
     Q_PROPERTY(QVideoSink* videoSink READ videoSink WRITE setVideoSink NOTIFY videoSinkChanged)
 public:
@@ -19,6 +20,7 @@ public:
     QUrl source() const { return source_; }
     bool playing() const { return playing_; }
     bool ready() const { return ready_; }
+    QString errorString() const { return error_; }
     bool bounded() const { return !fallback_; }
     QVideoSink* videoSink() const { return sink_; }
     void setSource(const QUrl& source);
@@ -31,10 +33,12 @@ Q_SIGNALS:
     void readyChanged();
     void videoSinkChanged();
     void looped();
+    void errorChanged();
 private:
     void useQtBackend();
     void present(const QVideoFrame& frame);
     QUrl source_;
+    QString error_;
     QPointer<QVideoSink> sink_;
     MvFrameStream stream_;
     std::unique_ptr<QMediaPlayer> fallback_;

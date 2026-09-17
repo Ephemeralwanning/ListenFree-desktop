@@ -34,16 +34,16 @@ Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng �
 安装 Inno Setup 6 和 7-Zip 后生成干净的安装版与便携 ZIP：
 
 ```powershell
-./scripts/windows/package-release.ps1 -Version 0.3.2
+./scripts/windows/package-release.ps1 -Version 0.3.3
 ```
 
-只生成便携 ZIP 时追加 `-PortableOnly`，无需安装 Inno Setup。0.3.2 的本地整合内容见 [更新说明](packaging/release-notes-0.3.2.txt)。
+只生成安装包时追加 `-InstallerOnly`，无需 7-Zip。只生成便携 ZIP 时追加 `-PortableOnly`，无需安装 Inno Setup。0.3.3 的本地整合内容见 [更新说明](packaging/release-notes-0.3.3.txt)。
 
 使用已经验收的运行库目录可传入 `-RuntimeDirectory <目录>`；追加 `-SkipChecksums` 可只生成安装包和便携 ZIP，不生成校验文件。
 
 发行脚本只收集程序、运行库、使用说明和许可，排除个人数据与用户音源；输出目录必须是尚未生成过的版本目录，也可指定 OutputDirectory。
 
-##页面样式
+## 页面样式
 <img width="1599" height="1064" alt="屏幕截图 2026-09-14 223758" src="https://github.com/user-attachments/assets/43368130-ad05-42b8-bece-bd64ffb560d3" />
 <img width="1599" height="1064" alt="屏幕截图 2026-09-14 223742" src="https://github.com/user-attachments/assets/13e8b7aa-8c05-4bf8-8363-b178deaf20e4" />
 
@@ -55,3 +55,13 @@ Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng �
 
 
 src/、music_player_desktop/、ui/ 是应用与资源；tests/ 和 tools/ 保留构建引用的验证代码；patches/、scripts/、packaging/ 和 licenses/ 为依赖修改及打包输入。个人文档、开发规划、生成物和测试结果不进入仓库。组件归属与许可见 licenses/THIRD-PARTY-NOTICES.txt。
+
+## 软件更新与发布
+
+“设置 → 关于 → 检查软件更新”使用 [WinSparkle 0.9.4](https://winsparkle.org/guides/getting-started/) 提示新版、展示更新说明、下载并验证签名，用户确认后启动 Inno Setup。只在手动检查时加载组件，关闭定期检查。安装版原目录升级；便携版原目录覆盖程序文件，保留 portable.mode 与 data，且不创建卸载项或快捷方式。0.3.2 及更早版本需先手动升级一次。
+
+CMake 从官方 Release 获取已固定 SHA-256 的 WinSparkle x64 包，也可设置 `LISTENFREE_WINSPARKLE_ROOT` 指向解压目录；运行时只分发 DLL 和许可。更新信息地址固定为本仓库 `releases/latest/download/appcast.xml`，文件中指向明确版本的 Setup.exe。比较后选择 WinSparkle 的原因是它已经提供 EdDSA 验签和原生更新界面，可直接配合现有安装器；QSimpleUpdater 仍需另接签名校验，Velopack 则需要迁移安装布局。
+
+安装版打包脚本同时生成已签名的 appcast.xml，核对签名私钥与 `src/app/update_public_key.h` 中的公钥是否一致，并重新验签。默认私钥位置为 `%LOCALAPPDATA%/ListenFree/ReleaseSigning/winsparkle-private.key`，可用 `-SigningKeyFile` 指定工作区外的备份。**务必备份原私钥；不要提交、上传或重新生成替代密钥，否则已发布版本无法信任后续更新。**
+
+发布时把 Setup.exe 和 appcast.xml 上传同一个 GitHub Release，全部校验完成后再标记为最新正式版。预发布不要设为 latest；无需额外上传 SHA 文件。可单独调用 `scripts/windows/new-update-appcast.ps1` 对安装包签名并生成更新信息。

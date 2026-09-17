@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ListenFree VERSION 0.3.2 LANGUAGES CXX)
+project(ListenFree VERSION 0.3.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -256,6 +256,8 @@ add_library(listenfree_qmlbridge STATIC
     src/qmlbridge/list_models.cpp
     src/qmlbridge/controllers.h
     src/qmlbridge/controllers.cpp
+    src/qmlbridge/wallpaper_library.h
+    src/qmlbridge/wallpaper_library.cpp
 )
 target_link_libraries(listenfree_qmlbridge
     PUBLIC listenfree_application listenfree_database listenfree_library listenfree_online Qt6::Core Qt6::Qml
@@ -320,6 +322,7 @@ endif()
 qt_add_executable(listenfree WIN32 src/app/listenfree.rc src/app/main.cpp src/app/platform_settings.h src/app/platform_settings.cpp src/app/shortcut_service.h src/app/shortcut_service.cpp src/qmlbridge/spring_value.h src/qmlbridge/lyric_text_metrics.h src/qmlbridge/background_contrast.h src/qmlbridge/album_mosaic_model.h)
 if(WIN32 AND LISTENFREE_BUILD_QMMP_BACKEND)
     include(cmake/WindowsMediaSession.cmake)
+    include(cmake/WinSparkle.cmake)
 endif()
 if(WIN32 AND LISTENFREE_SEGMENT_HEAP)
     # The OS chooses the allocator before DLL initialization; unsupported Windows
@@ -368,6 +371,7 @@ qt_add_qml_module(listenfree
         music_player_desktop/components/UiButton.qml
         music_player_desktop/components/AlertDialog.qml
         music_player_desktop/components/SettingsTransferDialog.qml
+        music_player_desktop/components/WallpaperPickerPopup.qml
         music_player_desktop/components/ScrollPosition.qml
         music_player_desktop/components/SegmentedTabBar.qml
         music_player_desktop/components/ArtworkTile.qml

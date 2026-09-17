@@ -75,8 +75,25 @@ inline constexpr char settingsSchema[] = R"json({
     "values": [
       "AutoCover",
       "Image",
-      "Color"
+      "Color",
+      "Video",
+      "Wallpaper"
     ]
+  },
+  "background.video": {
+    "category": "appearance",
+    "default": "",
+    "path": true
+  },
+  "background.wallpaper": {
+    "category": "appearance",
+    "default": "",
+    "path": true
+  },
+  "background.wallpaperFolder": {
+    "category": "appearance",
+    "default": "",
+    "path": true
   },
   "download.embedContent.Album": {
     "category": "download",

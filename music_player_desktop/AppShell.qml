@@ -65,7 +65,6 @@ Item {
                     onClicked: {
                         shell.downloadController.add(shell.pendingDownloadTracks, modelData.value)
                         downloadPicker.close()
-                        shell.downloadsOpen = true
                     }
                 }
             }
@@ -728,7 +727,7 @@ Item {
 
     Rectangle {
         id: appSurface
-        enabled: !equalizerPopup.visible && !lyricsMatchPopup.visible && !(AppTheme.currentPopup && ["backgroundColorPicker", "playlistSharePopup"].indexOf(AppTheme.currentPopup.objectName) >= 0)
+        enabled: !equalizerPopup.visible && !lyricsMatchPopup.visible && !(AppTheme.currentPopup && ["backgroundColorPicker", "backgroundWallpaperPicker", "playlistSharePopup"].indexOf(AppTheme.currentPopup.objectName) >= 0)
         anchors.fill: parent
         radius: shell.hostWindow ? shell.hostWindow.cornerRadius : 8
         clip: true

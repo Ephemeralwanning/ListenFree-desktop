@@ -56,6 +56,9 @@ extra = {
     'source.updateNotificationsEnabled': ('source', True, None),
     'background.color': ('appearance', '#c8bad9', None),
     'background.image': ('appearance', '', None),
+    'background.video': ('appearance', '', None),
+    'background.wallpaper': ('appearance', '', None),
+    'background.wallpaperFolder': ('appearance', '', None),
     'background.blur': ('appearance', 56, None),
     'background.autoBlurPx': ('appearance', 32, None),
     'download.folder': ('download', '', None),
@@ -66,7 +69,7 @@ for key, (category, default, values) in extra.items():
         rules[key]['values'] = values
     if key in ['background.blur', 'background.autoBlurPx']:
         rules[key].update(min=0, max=192)
-    if key in ['background.image', 'download.folder']:
+    if key in ['background.image', 'background.video', 'background.wallpaper', 'background.wallpaperFolder', 'download.folder']:
         rules[key]['path'] = True
 # Source identity is local to the installed scripts and is deliberately excluded.
 encoded = json.dumps(rules, ensure_ascii=False, indent=2, sort_keys=True)

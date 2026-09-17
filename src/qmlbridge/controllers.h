@@ -264,6 +264,8 @@ public:
     int revision() const { return revision_; }
     Q_INVOKABLE QVariant value(const QString& key, const QVariant& fallback = {}) const;
     Q_INVOKABLE void setValue(const QString& key, const QVariant& value);
+    Q_INVOKABLE QString localFilePath(const QUrl& url) const;
+    Q_INVOKABLE QVariantMap resolveBackground(const QUrl& url, bool wallpaperProject) const;
     bool reloadValues(const QVariantMap& values);
     bool applyingBatch() const { return applyingBatch_; }
     void rejectBatch() { batchRejected_=true; }

@@ -64,6 +64,8 @@ try {
     Invoke-Checked (Join-Path $QtRoot 'bin\windeployqt.exe') @('--release','--compiler-runtime','--no-translations',(Join-Path $stage 'listenfree-sourcehost.exe'))
     New-Item -ItemType Directory -Force -Path (Join-Path $stage 'imageformats') | Out-Null
     Copy-Item -LiteralPath $webpPlugin -Destination (Join-Path $stage 'imageformats\qwebp.dll') -Force
+    # QLibrary dependencies are not discovered by windeployqt.
+    Copy-Item -LiteralPath (Join-Path $buildDir 'WinSparkle.dll') -Destination $stage
     # The application opens QSQLITE only; unused database plugins require server SDKs.
     $sqlRoot=[IO.Path]::GetFullPath((Join-Path $stage 'sqldrivers'))
     if (!$sqlRoot.StartsWith($allowedRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe SQL plugin path' }

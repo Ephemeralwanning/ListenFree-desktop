@@ -1,5 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Window
+import QtMultimedia
 
 Item {
     id: root
@@ -15,10 +17,17 @@ Item {
         return settingsStore.value(key,fallback)
     }
     readonly property string backgroundType: immersive ? "AutoCover" : setting("background.type","AutoCover")
+    readonly property bool localMedia: backgroundType === "Video" || backgroundType === "Wallpaper"
+    readonly property url localMediaFile: localMedia ? setting(backgroundType === "Wallpaper" ? "background.wallpaper" : "background.video", "") : ""
+    readonly property var resolvedMedia: localMedia && settingsStore
+        ? settingsStore.resolveBackground(localMediaFile, backgroundType === "Wallpaper") : ({})
+    readonly property bool videoBackground: localMedia && resolvedMedia.kind === "Video"
+    readonly property bool exposed: visible && (!Window.window || (Window.window.visible && Window.window.visibility !== Window.Minimized))
     readonly property url defaultImage: Qt.resolvedUrl("../assets/background-pastel.svg")
     readonly property url chosenImage: setting("background.image","") || defaultImage
-    readonly property url desiredSource: backgroundType === "Image" ? chosenImage : artwork
-    readonly property string visualStyle: backgroundType === "Image" ? "BlurredArtwork" : autoStyle
+    readonly property url desiredSource: localMedia ? (resolvedMedia.kind === "Image" ? resolvedMedia.source : "")
+        : backgroundType === "Color" ? "" : backgroundType === "Image" ? chosenImage : artwork
+    readonly property string visualStyle: backgroundType === "Image" || localMedia ? "BlurredArtwork" : autoStyle
     readonly property real mask: immersive ? .24 : Math.max(0,Math.min(1,setting("background.mask",0)/100))
     readonly property real blurRadius: immersive ? 0 : Math.max(0,Math.min(192,
         backgroundType === "AutoCover" ? setting("background.autoBlurPx",width*.03) : setting("background.blur",56)))
@@ -85,7 +94,7 @@ Item {
     Rectangle { anchors.fill: parent; color: AppTheme.pageBackground }
     ArtworkBackground {
         id: layerA
-        visible: root.backgroundType !== "Color"
+        visible: root.backgroundType !== "Color" && !root.localMedia || root.resolvedMedia.kind === "Image"
         anchors.fill: parent; mode: root.visualStyle
         neutralImage: !root.immersive
         sylvakruAuto: !root.immersive && root.backgroundType === "AutoCover"
@@ -100,7 +109,7 @@ Item {
     }
     ArtworkBackground {
         id: layerB
-        visible: root.backgroundType !== "Color"
+        visible: root.backgroundType !== "Color" && !root.localMedia || root.resolvedMedia.kind === "Image"
         anchors.fill: parent; mode: root.visualStyle
         neutralImage: !root.immersive
         sylvakruAuto: !root.immersive && root.backgroundType === "AutoCover"
@@ -110,6 +119,51 @@ Item {
         z: root.frontIsA ? 0 : 1
         opacity: root.frontIsA ? 1 : root.frontOpacity
         onVisualReadyChanged: if(visualReady)Qt.callLater(root.promote,layerB,false)
+    }
+    Loader {
+        id: localVideoLoader
+        objectName: "backgroundVideoLoader"
+        anchors.fill: parent
+        active: root.videoBackground
+        z: 1
+        sourceComponent: Item {
+            id: videoBackgroundItem
+            property var movie: typeof backendArtworkVideoFactory !== "undefined"
+                ? backendArtworkVideoFactory.create(videoBackgroundItem) : null
+            Binding { target: videoBackgroundItem.movie; property: "videoSink"; value: backgroundVideo.videoSink; when: !!videoBackgroundItem.movie }
+            Binding { target: videoBackgroundItem.movie; property: "playing"; value: root.exposed; when: !!videoBackgroundItem.movie }
+            Binding { target: videoBackgroundItem.movie; property: "source"; value: root.resolvedMedia.source || ""; when: !!videoBackgroundItem.movie }
+            VideoOutput {
+                id: backgroundVideo
+                objectName: "backgroundVideoOutput"
+                anchors.fill: parent
+                fillMode: VideoOutput.PreserveAspectCrop
+                visible: root.blurRadius <= 0
+            }
+            ArtworkBackground {
+                anchors.fill: parent
+                visible: root.blurRadius > 0
+                mode: "BlurredArtwork"
+                neutralImage: true
+                blurRadius: root.blurRadius
+                motionTexture: videoBackgroundItem.movie && videoBackgroundItem.movie.ready ? backgroundVideo : null
+            }
+            Connections {
+                target: videoBackgroundItem.movie
+                function onReadyChanged() { if (videoBackgroundItem.movie.ready) root.sampleContrastSoon() }
+            }
+        }
+    }
+    Text {
+        anchors.centerIn: parent
+        width: Math.min(480, parent.width - 40)
+        z: 3
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        color: AppTheme.textSecondary
+        text: root.resolvedMedia.error || (localVideoLoader.item && localVideoLoader.item.movie
+            ? localVideoLoader.item.movie.errorString : "")
+        visible: root.localMedia && text.length > 0
     }
     Rectangle {
         anchors.fill: parent; visible: root.backgroundType==="Color"; z: 2

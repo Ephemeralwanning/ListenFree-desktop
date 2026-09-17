@@ -19,11 +19,145 @@
 #include "qmlbridge/artwork_texture_factory.h"
 #include "qmlbridge/remote_artwork_provider.h"
 #include "qmlbridge/list_models.h"
+#include "qmlbridge/controllers.h"
+#include "qmlbridge/wallpaper_library.h"
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "media/artwork_video.h"
 
 class ResourceOwnershipTests : public QObject {
     Q_OBJECT
 private Q_SLOTS:
+    void wallpaperLibraryDiscoveryAndPicker() {
+        using listenfree::qmlbridge::WallpaperLibrary;
+        QTemporaryDir temporary;QVERIFY(temporary.isValid());
+        const auto steam=temporary.filePath("Steam");const auto second=temporary.filePath(QString::fromUtf8("其他 Steam 库"));
+        const auto library=second+"/steamapps/workshop/content/431960";
+        QVERIFY(QDir().mkpath(steam+"/steamapps"));QVERIFY(QDir().mkpath(library));
+        QFile vdf(steam+"/steamapps/libraryfolders.vdf");QVERIFY(vdf.open(QIODevice::WriteOnly));
+        auto escaped=QDir::toNativeSeparators(second);escaped.replace("\\","\\\\");
+        vdf.write(("\"libraryfolders\"\n{\n\"0\"\n{\n\"path\" \""+escaped+"\"\n}\n\"1\" \""+escaped+"\"\n}\n").toUtf8());vdf.close();
+        for(const auto* name:{"video", "scene", "web", "missing"}) {
+            const auto directory=library+'/'+name;QVERIFY(QDir().mkpath(directory));
+            if(QString(name)!="missing")QVERIFY(QFile::copy(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/tests/fixtures/artwork-red-blue.mp4"),directory+"/wall.mp4"));
+            QImage preview(80,45,QImage::Format_RGB32);preview.fill(Qt::blue);QVERIFY(preview.save(directory+"/preview.png"));
+            QFile file(directory+"/project.json");QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QJsonDocument(QJsonObject{{"title",QString::fromUtf8("蓝色测试壁纸")},{"type",QString(name)=="video"||QString(name)=="missing"?"Video":name},{"file","wall.mp4"},{"preview","preview.png"}}).toJson());
+        }
+        auto cancelled=std::make_shared<std::atomic_bool>(false);
+        const auto result=WallpaperLibrary::discover({steam,steam},library,cancelled);
+        QCOMPARE(result.items.size(),1);QCOMPARE(result.skipped,3);QCOMPARE(result.roots.size(),1);
+        QVERIFY(!result.items[0].toMap().value("preview").toUrl().isEmpty());
+        QCOMPARE(WallpaperLibrary::discover({},library+"/video",cancelled).items.size(),1);
+        *cancelled=true;QVERIFY(WallpaperLibrary::discover({steam},{},cancelled).items.isEmpty());
+        WallpaperLibrary service(nullptr,{steam});
+        service.scan();service.cancel();service.scan();
+        QTRY_VERIFY_WITH_TIMEOUT(!service.busy(),8000);QCOMPARE(service.items().size(),1);
+
+        const auto components=temporary.filePath("components");QVERIFY(QDir().mkpath(components));
+        for(const auto* name:{"WallpaperPickerPopup","AppTheme","UiButton","RoundIconButton","IconGlyph","GlassSurface"})
+            QVERIFY(QFile::copy(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/music_player_desktop/components/")+name+".qml",components+"/"+name+".qml"));
+        QFile module(components+"/qmldir");QVERIFY(module.open(QIODevice::WriteOnly));
+        module.write("singleton AppTheme 1.0 AppTheme.qml\n");module.close();
+        listenfree::qmlbridge::SettingsController settings;
+        QQmlEngine engine;engine.rootContext()->setContextProperty("testLibrary",&service);engine.rootContext()->setContextProperty("testSettings",&settings);
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport QtQuick.Controls.Basic\nimport \"components\"\nApplicationWindow { visible: true; width: 800; height: 640; WallpaperPickerPopup { objectName: \"picker\"; service: testLibrary; settingsStore: testSettings } }",QUrl::fromLocalFile(temporary.filePath("Test.qml")));
+        std::unique_ptr<QObject> root(component.create());QVERIFY2(root,qPrintable(component.errorString()));
+        auto* window=qobject_cast<QQuickWindow*>(root.get());QVERIFY(window);QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto* popup=root->findChild<QObject*>("picker");QVERIFY(popup);QSignalSpy selected(popup,SIGNAL(wallpaperSelected(QUrl)));
+        QVERIFY(selected.isValid());QVERIFY(QMetaObject::invokeMethod(popup,"open"));
+        QTRY_VERIFY_WITH_TIMEOUT(!service.busy() && service.items().size()==1,8000);
+        auto* content=popup->property("contentItem").value<QQuickItem*>();QVERIFY(content);
+        auto* search=content->findChild<QObject*>("wallpaperSearch");auto* grid=content->findChild<QObject*>("wallpaperGrid");QVERIFY(search);QVERIFY(grid);
+        search->setProperty("text","no match");QTRY_COMPARE(grid->property("count").toInt(),0);
+        search->setProperty("text",QString::fromUtf8("蓝色"));QTRY_COMPARE(grid->property("count").toInt(),1);
+        const auto findCard=[&](auto&& self,QQuickItem* item)->QQuickItem* {
+            if(item->objectName()=="wallpaperCard")return item;
+            for(auto* child:item->childItems())if(auto* found=self(self,child))return found;
+            return nullptr;
+        };
+        QQuickItem* card=nullptr;QTRY_VERIFY((card=findCard(findCard,content))!=nullptr);
+        QTest::qWait(250);
+        QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,card->mapToScene({card->width()/2,card->height()/2}).toPoint());
+        QTRY_COMPARE(selected.size(),1);
+        QCOMPARE(selected[0][0].toUrl(),result.items[0].toMap().value("project").toUrl());
+        QTRY_VERIFY(!popup->property("visible").toBool());QTRY_VERIFY(service.items().isEmpty());
+    }
+    void localWallpaperResolution() {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        listenfree::qmlbridge::SettingsController settings;
+        const auto video=directory.filePath(QString::fromUtf8("背景 space #1.mp4"));
+        QVERIFY(QFile::copy(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/tests/fixtures/artwork-red-blue.mp4"),video));
+        const auto project=directory.filePath("project.json");
+        const auto writeProject=[&](const QByteArray& bytes) {
+            QFile file(project); if(!file.open(QIODevice::WriteOnly))return false;
+            return file.write(bytes)==bytes.size();
+        };
+        const auto resolve=[&]{return settings.resolveBackground(QUrl::fromLocalFile(project),true);};
+        QVERIFY(writeProject(QJsonDocument(QJsonObject{{"type","video"},{"file",QFileInfo(video).fileName()}}).toJson()));
+        QCOMPARE(resolve().value("kind").toString(),QString("Video"));
+        QCOMPARE(resolve().value("source").toUrl(),QUrl::fromLocalFile(video));
+        QCOMPARE(settings.localFilePath(QUrl::fromLocalFile(video)),QDir::toNativeSeparators(video));
+        QCOMPARE(settings.resolveBackground(QUrl::fromLocalFile(video),false).value("kind").toString(),QString("Video"));
+        for(const auto& bytes:{QByteArray("not json"),QByteArray("[]"),
+            QByteArray("{\"type\":\"scene\",\"file\":\"scene.pkg\"}"),
+            QByteArray("{\"type\":\"web\",\"file\":\"index.html\"}"),
+            QByteArray("{\"type\":\"video\",\"file\":\"missing.mp4\"}"),
+            QByteArray("{\"type\":\"video\",\"file\":\"https://example.com/video.mp4\"}"),
+            QByteArray("{\"type\":\"video\",\"file\":\"../outside.mp4\"}")}) {
+            QVERIFY(writeProject(bytes)); QVERIFY(!resolve().value("error").toString().isEmpty());
+        }
+        QImage image(8,8,QImage::Format_RGB32);image.fill(Qt::green);
+        QVERIFY(image.save(directory.filePath("wall.png")));
+        QVERIFY(writeProject("{\"type\":\"image\",\"file\":\"wall.png\"}"));
+        QCOMPARE(resolve().value("kind").toString(),QString("Image"));
+        QVERIFY(writeProject(QByteArray(1024*1024+1,' ')));QVERIFY(!resolve().value("error").toString().isEmpty());
+        QVERIFY(!settings.resolveBackground(QUrl("https://example.com/project.json"),true).value("error").toString().isEmpty());
+        QVERIFY(settings.resolveBackground({},true).isEmpty());
+    }
+    void localVideoBackgroundLifecycle() {
+        QTemporaryDir temporary;QVERIFY(temporary.isValid());
+        const auto fixture=temporary.filePath("components");QVERIFY(QDir().mkpath(fixture));
+        for(const auto* name:{"GlobalBackground","ArtworkBackground","AppTheme"})
+            QVERIFY(QFile::copy(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/music_player_desktop/components/")+name+".qml",fixture+"/"+name+".qml"));
+        QFile module(fixture+"/qmldir");QVERIFY(module.open(QIODevice::WriteOnly));
+        module.write("singleton AppTheme 1.0 AppTheme.qml\nGlobalBackground 1.0 GlobalBackground.qml\nArtworkBackground 1.0 ArtworkBackground.qml\n");module.close();
+        const auto assets=temporary.filePath("assets");QVERIFY(QDir().mkpath(assets));
+        QVERIFY(QFile::copy(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/music_player_desktop/assets/background-grain.svg"),assets+"/background-grain.svg"));
+        listenfree::qmlbridge::SettingsController settings;
+        settings.setValue("background.type","Video");settings.setValue("background.blur",0);
+        const QUrl source=QUrl::fromLocalFile(QStringLiteral(LISTENFREE_TEST_SOURCE_DIR "/tests/fixtures/artwork-red-blue.mp4"));
+        settings.setValue("background.video",source.toString());
+        listenfree::media::ArtworkVideoFactory factory;
+        QQmlEngine engine;engine.rootContext()->setContextProperty("backendArtworkVideoFactory",&factory);
+        QQmlComponent component(&engine,QUrl::fromLocalFile(fixture+"/GlobalBackground.qml"));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties({{"settingsStore",QVariant::fromValue(&settings)}}));
+        QVERIFY2(root,qPrintable(component.errorString()));
+        auto* item=qobject_cast<QQuickItem*>(root.get());QVERIFY(item);
+        QQuickWindow window;window.resize(200,120);item->setParentItem(window.contentItem());item->setSize({200,120});
+        window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(item->findChild<listenfree::media::ArtworkVideo*>());
+        QPointer<listenfree::media::ArtworkVideo> movie=item->findChild<listenfree::media::ArtworkVideo*>();
+        QTRY_VERIFY_WITH_TIMEOUT(movie->ready(),8000);QVERIFY(movie->playing());QVERIFY(movie->bounded());
+        QSignalSpy loops(movie,&listenfree::media::ArtworkVideo::looped);
+        QTRY_VERIFY_WITH_TIMEOUT(!loops.isEmpty(),5000);
+        const auto grab=item->grabToImage();QSignalSpy grabReady(grab.get(),&QQuickItemGrabResult::ready);
+        if(grabReady.isEmpty())QVERIFY(grabReady.wait(3000));
+        const auto pixel=grab->image().pixelColor(100,60);
+        QVERIFY2(pixel.red()>150 || pixel.blue()>150,"Background should render the video, not only advance its decoder");
+        item->setVisible(false);QTRY_VERIFY(!movie->playing());
+        item->setVisible(true);QTRY_VERIFY(movie->playing());
+        window.hide();QTRY_VERIFY(!movie->playing());window.show();QTRY_VERIFY(movie->playing());
+        const auto project=temporary.filePath("project.json");
+        QVERIFY(QFile::copy(source.toLocalFile(),temporary.filePath("wall.mp4")));
+        QFile file(project);QVERIFY(file.open(QIODevice::WriteOnly));file.write("{\"type\":\"video\",\"file\":\"wall.mp4\"}");file.close();
+        settings.setValue("background.wallpaper",QUrl::fromLocalFile(project).toString());settings.setValue("background.type","Wallpaper");
+        QTRY_COMPARE(movie->source(),QUrl::fromLocalFile(temporary.filePath("wall.mp4")));
+        QTRY_VERIFY_WITH_TIMEOUT(movie->ready(),8000);
+        settings.setValue("background.type","Color");QTRY_VERIFY(movie.isNull());
+        QVERIFY(item->findChildren<listenfree::media::ArtworkVideo*>().isEmpty());
+    }
     void textureRecreatesExactPixels() {
         QImage original(512,384,QImage::Format_ARGB32_Premultiplied);
         for(int y=0;y<original.height();++y) for(int x=0;x<original.width();++x)

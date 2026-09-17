@@ -21,6 +21,7 @@
 #include "qmlbridge/account_service.h"
 #include "qmlbridge/duplicate_service.h"
 #include "qmlbridge/settings_transfer.h"
+#include "qmlbridge/wallpaper_library.h"
 #include "interface_translator.h"
 #include "../../tools/integration_completion_regression.h"
 #include "../../tools/portable_acceptance.h"
@@ -60,7 +61,7 @@ int main(int argc, char* argv[]) {
     app.setWindowIcon(QIcon(":/qt/qml/ListenFree/Bootstrap/music_player_desktop/assets/icons/app.png"));
     app.setApplicationName("ListenFree");
     app.setOrganizationName("ListenFree");
-    app.setApplicationVersion("0.3.2");
+    app.setApplicationVersion("0.3.3");
 #ifdef Q_OS_WIN
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     listenfree::WindowsMediaSession::registerApplicationIdentity("ListenFree.Desktop", "ListenFree");
@@ -169,6 +170,8 @@ int main(int argc, char* argv[]) {
     engine.rootContext()->setContextProperty("backendAccounts",&accounts);
     engine.rootContext()->setContextProperty("backendRadioController",&radioController);
     engine.rootContext()->setContextProperty("backendSettingsTransfer",&transfer);
+    auto* wallpaperLibrary = new listenfree::qmlbridge::WallpaperLibrary(&engine);
+    engine.rootContext()->setContextProperty("backendWallpaperLibrary", wallpaperLibrary);
     engine.rootContext()->setContextProperty("backendDuplicates",&duplicates);
     engine.rootContext()->setContextProperty("backendShortcuts", &shortcuts);
     engine.addImageProvider("covers", new CoverImageProvider);

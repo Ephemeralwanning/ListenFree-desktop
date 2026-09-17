@@ -14,6 +14,7 @@ void ArtworkVideo::setSource(const QUrl& source) {
     if (source_ == source) return;
     stream_.close(); fallback_.reset();
     source_ = source; ready_ = false;
+    if (!error_.isEmpty()) { error_.clear(); emit errorChanged(); }
     if (sink_) sink_->setVideoFrame({});
     if (!source.isEmpty()) stream_.open(source);
     emit sourceChanged(); emit readyChanged();
@@ -47,8 +48,18 @@ void ArtworkVideo::useQtBackend() {
     fallback_ = std::make_unique<QMediaPlayer>();
     fallback_->setVideoSink(sink_);
     fallback_->setLoops(QMediaPlayer::Infinite);
-    connect(fallback_.get(), &QMediaPlayer::errorOccurred, this, [this] {
+    connect(fallback_.get(), &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString& error) {
+        error_ = error; emit errorChanged();
         ready_ = false; emit readyChanged();
+    });
+    connect(fallback_.get(), &QMediaPlayer::tracksChanged, this, [this] {
+        fallback_->setActiveAudioTrack(-1);
+        fallback_->setActiveSubtitleTrack(-1);
+    });
+    connect(fallback_.get(), &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status) {
+        if (status == QMediaPlayer::LoadedMedia && !fallback_->hasVideo()) {
+            fallback_->stop(); error_ = tr("文件中没有可播放的视频画面。"); emit errorChanged();
+        }
     });
     fallback_->setSource(source_);
     // Decode a poster even when a cover starts paused.

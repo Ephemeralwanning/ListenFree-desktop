@@ -7,7 +7,7 @@
 #include <QQuickWindow>
 #include <QSystemTrayIcon>
 #include <QTimer>
-#include <QNetworkAccessManager>
+#include "update_service.h"
 #include <atomic>
 
 namespace listenfree {
@@ -43,8 +43,7 @@ private:
   QTimer status_;
   QTimer mediaUpdate_;
   WindowsMediaSession* mediaSession_{};
-  QNetworkAccessManager network_;
-  bool checkingUpdates_{false};
+  std::unique_ptr<UpdateService> updater_;
   bool transparencyActive_{false};
   bool quitting_{false};
   void *taskbar_{nullptr};

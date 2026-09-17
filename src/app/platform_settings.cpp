@@ -17,13 +17,9 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFile>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QNetworkReply>
 #include <QSysInfo>
 #include <QTextEdit>
 #include <QVBoxLayout>
-#include <QVersionNumber>
 #include <dwmapi.h>
 #include <shobjidl.h>
 #include <windows.h>
@@ -324,19 +320,16 @@ void PlatformSettings::action(const QString &key) {
     if(!QDesktopServices::openUrl(QUrl("https://github.com/Tabris-Ayanami/ListenFree-desktop/releases")))emit player_.notice(tr("无法打开下载页面。"));return;
   }
   if(key=="updates.checkManually") {
-    if(checkingUpdates_)return;checkingUpdates_=true;
-    QNetworkRequest request(QUrl("https://api.github.com/repos/Tabris-Ayanami/ListenFree-desktop/releases/latest"));
-    request.setTransferTimeout(15000);request.setRawHeader("Accept","application/vnd.github+json");request.setRawHeader("User-Agent","ListenFree");
-    auto* reply=network_.get(request);
-    connect(reply,&QNetworkReply::finished,this,[this,reply] {
-      checkingUpdates_=false;reply->deleteLater();
-      if(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()==404){emit player_.notice(tr("发布页尚无可访问的公开版本，可在下载页面查看。"));return;}
-      if(reply->error()!=QNetworkReply::NoError){emit player_.notice(tr("检查更新失败，请稍后重试。"));return;}
-      auto tag=QJsonDocument::fromJson(reply->readAll()).object().value("tag_name").toString();if(tag.startsWith('v'))tag.remove(0,1);
-      const auto version=QVersionNumber::fromString(tag);
-      if(version.isNull()){emit player_.notice(tr("发布信息中没有有效版本号。"));return;}
-      emit player_.notice(version>QVersionNumber::fromString(qApp->applicationVersion())?tr("发现新版本 %1，请打开下载页面查看。 ").arg(tag):tr("当前已是最新公开版本。"));
-    });return;
+    if (!updater_) {
+      updater_ = std::make_unique<UpdateService>(UpdateService::productionConfiguration());
+      connect(updater_.get(), &UpdateService::shutdownRequested, this, [this] {
+        quitting_ = true;
+        qApp->quit();
+      });
+    }
+    QString error;
+    if (!updater_->check(&error)) emit player_.notice(error);
+    return;
   }
   if(key=="about.licenses") {
     auto* dialog=new QDialog;dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setWindowTitle(tr("开源许可"));dialog->resize(760,580);

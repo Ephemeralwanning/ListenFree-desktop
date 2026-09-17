@@ -88,7 +88,12 @@ bool SettingsTransfer::inspectFile(const QUrl& url) {
         }
         if (rule.value("path").toBool()) {
             if (!createPaths_) { ++ignored; continue; }
-            QString path=it.value().toString(); if (it.key()=="background.image") path=QUrl(path).toLocalFile();
+            QString path=it.value().toString();
+            if (it.key()=="background.image" || it.key()=="background.video" || it.key()=="background.wallpaper" || it.key()=="background.wallpaperFolder") {
+                const QUrl url(path);
+                if (!path.isEmpty() && !url.isLocalFile()) { emit notice(tr("备份中的背景必须是本地文件。")); pending_={}; return false; }
+                path=url.toLocalFile();
+            }
             if (!path.isEmpty() && !QDir::isAbsolutePath(path)) { emit notice(tr("备份中的本机路径无效。")); pending_={}; return false; }
         }
         pending_.insert(it.key(),it.value());

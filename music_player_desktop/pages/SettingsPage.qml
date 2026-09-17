@@ -307,6 +307,31 @@ Item {
         title: qsTr("选择背景图片"); nameFilters: [qsTr("图片 (*.jpg *.jpeg *.png *.webp *.bmp)")]
         onAccepted: { page.handleSettingChanged("background.image",String(selectedFile));page.handleSettingChanged("background.type","Image") }
     }
+    function backgroundPathDetail(key, description) {
+        const source = setting(key, "")
+        return source && settingsStore ? settingsStore.localFilePath(source) || source : description
+    }
+    function acceptBackgroundFile(file, wallpaper) {
+        if (!settingsStore) return
+        const result = settingsStore.resolveBackground(file, wallpaper)
+        if (result.error) { showNotice(result.error); return }
+        page.handleSettingChanged(wallpaper ? "background.wallpaper" : "background.video", String(file))
+    }
+    FileDialog {
+        id: backgroundVideoPicker
+        objectName: "backgroundVideoPicker"
+        title: qsTr("选择背景视频")
+        nameFilters: [qsTr("视频 (*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.wmv)")]
+        onAccepted: page.acceptBackgroundFile(selectedFile, false)
+    }
+    WallpaperPickerPopup {
+        id: backgroundWallpaperPicker
+        settingsStore: page.settingsStore
+        selectedProject: page.setting("background.wallpaper", "")
+        extraFolder: page.setting("background.wallpaperFolder", "")
+        onWallpaperSelected: project => page.acceptBackgroundFile(project, true)
+        onFolderSelected: folder => page.handleSettingChanged("background.wallpaperFolder", String(folder))
+    }
     ColorPickerPopup {
         id: backgroundColorPicker
         onColorEdited: value => page.handleSettingChanged("background.color",String(value))
@@ -325,6 +350,8 @@ Item {
             return
         }
         if(key==="background.chooseImage"){backgroundImagePicker.open();return}
+        if(key==="background.chooseVideo"){backgroundVideoPicker.open();return}
+        if(key==="background.chooseWallpaper"){backgroundWallpaperPicker.open();return}
         if(key==="background.chooseColor"){backgroundColorPicker.selectedColor=setting("background.color","#c8bad9");backgroundColorPicker.open();return}
         if ([settingKeys.clearResourceCache, settingKeys.clearLibraryIndex, settingKeys.clearMyLists, settingKeys.clearShuffleHistory].indexOf(key) >= 0) { backendPlatform.action(key); return }
         if (key === settingKeys.downloadFolder && downloadController) { downloadController.chooseFolder(); return }
@@ -818,9 +845,11 @@ Item {
                     { title: qsTr("动态封面"), detail: qsTr("播放详情使用动态封面；不可用时显示静态封面。"), key: "appearance.dynamicArtworkEnabled", type: "toggle", checked: page.dynamicArtworkEnabled },
                     { title: qsTr("专辑页样式"), detail: qsTr("轮转、网格或可拖拽的拼窗；搜索专辑默认使用网格。"), key: "appearance.albumLayout", type: "select", options: [{label:qsTr("轮转"),value:"Flow"},{label:qsTr("网格"),value:"Grid"},{label:qsTr("拼窗"),value:"Mosaic"}], currentIndex: 0 },
                     { title: qsTr("播放详情背景样式"), detail: qsTr("适用于经典播放器；满溢自动使用封面模糊背景。"), enabled: page.setting("nowPlaying.playerStyle", "Classic") === "Classic", key: page.settingKeys.backgroundStyle, type: "select", options: [{label:qsTr("纯色"),value:"SolidMaterial"},{label:qsTr("模糊背景"),value:"BlurredArtwork"},{label:qsTr("动态流转"),value:"DynamicFlow"}], currentIndex: 0 },
-                    { title: qsTr("背景类型"), detail: qsTr("应用于主界面，不影响播放详情背景。"), key: "background.type", type: "select", options: [{label:qsTr("自动封面"),value:"AutoCover"},{label:qsTr("自选图片"),value:"Image"},{label:qsTr("自选颜色"),value:"Color"}], currentIndex: 0 },
-                    { title: qsTr("背景图片"), detail: qsTr("默认使用细颗粒渐变，也可选择本地图片。"), key: "background.chooseImage", type: "action", actionLabel: qsTr("选择图片"), visible: page.setting("background.type","AutoCover")==="Image" },
-                    { title: qsTr("背景颜色"), detail: qsTr("选择喜欢的颜色。"), key: "background.chooseColor", type: "action", actionLabel: qsTr("选择颜色"), visible: page.setting("background.type","AutoCover")==="Color" },
+                    { title: qsTr("背景类型"), detail: qsTr("应用于主界面，不影响播放详情背景。"), key: "background.type", type: "select", options: [{label:qsTr("自动封面"),value:"AutoCover"},{label:qsTr("自选图片"),value:"Image"},{label:qsTr("自选颜色"),value:"Color"},{label:qsTr("本地视频"),value:"Video"},{label:qsTr("Wallpaper Engine"),value:"Wallpaper"}], currentIndex: 0 },
+                    { title: qsTr("背景图片"), detail: page.backgroundPathDetail("background.image", qsTr("默认使用细颗粒渐变，也可选择本地图片。")), key: "background.chooseImage", type: "action", actionLabel: qsTr("选择图片"), visible: page.setting("background.type","AutoCover")==="Image" },
+                    { title: qsTr("背景颜色"), detail: page.setting("background.color", "") || qsTr("选择喜欢的颜色。"), key: "background.chooseColor", type: "action", actionLabel: qsTr("选择颜色"), visible: page.setting("background.type","AutoCover")==="Color" },
+                    { title: qsTr("背景视频"), detail: page.backgroundPathDetail("background.video", qsTr("选择本地视频，静音循环播放。")), key: "background.chooseVideo", type: "action", actionLabel: qsTr("选择视频"), visible: page.setting("background.type","AutoCover")==="Video" },
+                    { title: qsTr("Wallpaper 壁纸"), detail: page.backgroundPathDetail("background.wallpaper", qsTr("自动查找已下载的视频壁纸，点击预览即可选择。")), key: "background.chooseWallpaper", type: "action", actionLabel: qsTr("选择壁纸"), visible: page.setting("background.type","AutoCover")==="Wallpaper" },
                     { title: qsTr("背景模糊度"), detail: qsTr("0 px 为清晰；自动封面默认随窗口大小适配。"), key: page.setting("background.type","AutoCover") === "AutoCover" ? "background.autoBlurPx" : "background.blur", type: "slider", numericValue: page.setting("background.type","AutoCover") === "AutoCover" ? Math.round((page.Window.window ? page.Window.window.width : 1066)*.03) : 56, minimumValue: 0, maximumValue: 192, stepSize: 1, valueSuffix: " px", enabled: page.setting("background.type","AutoCover")!=="Color" },
                     { title: qsTr("遮罩透明度"), detail: qsTr("黑色遮罩的不透明度，0% 完全透明。"), key: "background.mask", type: "slider", numericValue: 0, minimumValue: 0, maximumValue: 100, stepSize: 1, valueSuffix: "%" }
                 ]
@@ -1218,9 +1247,9 @@ Item {
                 primaryText: page.primaryText
                 secondaryText: page.secondaryText
                 rows: [
-                    { title: "ListenFree", detail: qsTr("构建于 Qt 6.11.2。"), type: "info", readOnlyValue: "0.3.2" },
+                    { title: "ListenFree", detail: qsTr("构建于 Qt 6.11.2。"), type: "info", readOnlyValue: "0.3.3" },
                     { title: qsTr("复制诊断信息"), detail: qsTr("不会包含账号凭据和完整日志。"), key: page.settingKeys.copyDiagnostics, type: "action", actionLabel: qsTr("复制") },
-                    { title: qsTr("检查软件更新"), detail: qsTr("只检查 GitHub Releases，不自动下载。"), key: page.settingKeys.checkUpdates, type: "action", actionLabel: qsTr("检查") },
+                    { title: qsTr("检查软件更新"), detail: qsTr("检查 GitHub 新版本，可查看说明、下载并安装更新。"), key: page.settingKeys.checkUpdates, type: "action", actionLabel: qsTr("检查") },
                     { title: qsTr("打开下载页面"), detail: qsTr("使用系统浏览器打开 GitHub Releases。"), key: page.settingKeys.openReleasePage, type: "action", actionLabel: qsTr("打开") },
                     { title: qsTr("开源许可"), detail: qsTr("查看项目与第三方依赖许可证。"), key: page.settingKeys.openLicenses, type: "action", actionLabel: qsTr("查看") }
                 ]
@@ -1639,6 +1668,8 @@ Item {
     Component.onCompleted: {
         Qt.callLater(page.selectMatchingCategory)
         const args = Qt.application.arguments
+        if (args.indexOf("--wallpaper-picker-preview") >= 0)
+            Qt.callLater(function() { page.selectedCategory = 3; backgroundWallpaperPicker.open() })
         const categoryArg = args.indexOf("--settings-category")
         if (categoryArg >= 0 && categoryArg + 1 < args.length) {
             const routeName = args[categoryArg + 1]

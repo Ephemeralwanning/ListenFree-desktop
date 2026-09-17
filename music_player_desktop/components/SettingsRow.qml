@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as Basic
 
 Item {
     id: row
@@ -64,6 +65,11 @@ Item {
         Text {
             width: parent.width
             text: row.recording ? (row.shortcutService.error || qsTr("Esc 取消；点击右侧 × 清空绑定")) : row.shortcutConflict ? qsTr("此项与刚录入的快捷键冲突") : row.detail
+            textFormat: Text.PlainText
+            HoverHandler { id: detailHover }
+            Basic.ToolTip.visible: truncated && detailHover.hovered
+            Basic.ToolTip.text: text
+            Basic.ToolTip.delay: 500
             color: row.shortcutConflict || (row.recording && row.shortcutService.error.length) ? "#e46d69" : row.secondaryText
             elide: Text.ElideRight
             font.family: AppTheme.fontFamily

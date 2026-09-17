@@ -1,15 +1,18 @@
 [CmdletBinding()]
 param(
     [string]$SourceRoot='',
-    [string]$Version='0.3.2',
+    [string]$Version='0.3.3',
     [string]$OutputDirectory='',
     [string]$RuntimeDirectory='',
     [string]$InnoCompiler='C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     [string]$SevenZip='C:\Program Files\7-Zip\7z.exe',
+    [string]$SigningKeyFile=(Join-Path $env:LOCALAPPDATA 'ListenFree\ReleaseSigning\winsparkle-private.key'),
     [switch]$PortableOnly,
+    [switch]$InstallerOnly,
     [switch]$SkipChecksums
 )
 $ErrorActionPreference='Stop'
+if ($PortableOnly -and $InstallerOnly) { throw 'PortableOnly and InstallerOnly are mutually exclusive' }
 Set-StrictMode -Version Latest
 if (!$SourceRoot) { $SourceRoot=(Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Invalid release version' }
@@ -20,8 +23,9 @@ $releaseRoot=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{
 $stage=Join-Path $releaseRoot "ListenFree-$Version-windows-x64"
 # A fresh directory prevents an earlier smoke test's data from entering a ZIP.
 if (Test-Path -LiteralPath $stage) { throw "Release stage already exists: $stage" }
-$requiredInputs=@($SevenZip,(Join-Path $source 'build\portable\listenfree.exe'),(Join-Path $source 'build\portable\listenfree-sourcehost.exe'),(Join-Path $source 'packaging\usage.txt'))
+$requiredInputs=@((Join-Path $source 'build\portable\listenfree.exe'),(Join-Path $source 'build\portable\listenfree-sourcehost.exe'),(Join-Path $source 'packaging\usage.txt'))
 if (!$PortableOnly) { $requiredInputs += $InnoCompiler }
+if (!$InstallerOnly) { $requiredInputs += $SevenZip }
 foreach ($required in $requiredInputs) {
     if (!(Test-Path -LiteralPath $required)) { throw "Missing release input: $required" }
 }
@@ -33,7 +37,7 @@ foreach ($name in 'generic','iconengines','imageformats','multimedia','networkin
     $directory=Join-Path $runtime $name
     if (Test-Path -LiteralPath $directory) { Copy-Item -LiteralPath $directory -Destination $stage -Recurse }
 }
-foreach ($name in 'listenfree.exe','listenfree-sourcehost.exe') {
+foreach ($name in 'listenfree.exe','listenfree-sourcehost.exe','WinSparkle.dll') {
     Copy-Item -LiteralPath (Join-Path $source "build\portable\$name") -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $source '..\_vendor\qmmp-build-qt\src\plugins\Transports\http\http.dll') -Destination (Join-Path $stage 'qmmp\Transports\http.dll') -Force
@@ -61,12 +65,15 @@ $smokeData=Join-Path $source "build\release-smoke-$Version"
 if (!$PortableOnly) {
     & $InnoCompiler "/DStageDir=$stage" "/DOutputDir=$releaseRoot" "/DReleaseVersion=$Version" (Join-Path $PSScriptRoot 'listenfree.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+    & (Join-Path $PSScriptRoot 'new-update-appcast.ps1') -Installer (Join-Path $releaseRoot "ListenFree-$Version-windows-x64-Setup.exe") -Version $Version -SigningKeyFile $SigningKeyFile -ReleaseNotes $releaseNotes
 }
+if (!$InstallerOnly) {
 $zip=Join-Path $releaseRoot "ListenFree-$Version-windows-x64-Portable.zip"
 & $SevenZip a -tzip -mx=7 $zip $stage
 if ($LASTEXITCODE -ne 0) { throw 'Portable archive creation failed' }
 & $SevenZip t $zip
 if ($LASTEXITCODE -ne 0) { throw 'Portable archive integrity check failed' }
+}
 if (!$SkipChecksums) {
     $artifacts=Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object Extension -In '.exe','.zip'
     $checksums=foreach ($file in $artifacts) { "{0}  {1}" -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$file.Name }
