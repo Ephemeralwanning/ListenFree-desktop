@@ -1351,7 +1351,11 @@ private slots:
             QVERIFY(player.enqueueTrack(alias));QCOMPARE(player.queueSongs().size(),2);
             QVERIFY(player.selectQueue(0, false)); QVERIFY(player.moveQueue(0, 1));
             QCOMPARE(player.currentQueueIndex(), 1); QCOMPARE(player.currentTrack().value("entryId"), first);
+            const auto removedEntryId = player.queueSongs().first().toMap().value("entryId");
             QVERIFY(player.removeFromQueue(0)); QCOMPARE(player.currentQueueIndex(), 0);
+            QCOMPARE(player.queueModel()->rowCount(), 1);
+            QVERIFY(player.queueSongs().first().toMap().value("entryId") != removedEntryId);
+            QCOMPARE(player.queueSongs().first().toMap().value("entryId"), player.currentTrack().value("entryId"));
             player.setPlaybackMode("shuffle");
             player.shutdown();
         }

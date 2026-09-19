@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
     app.setWindowIcon(QIcon(":/qt/qml/ListenFree/Bootstrap/music_player_desktop/assets/icons/app.png"));
     app.setApplicationName("ListenFree");
     app.setOrganizationName("ListenFree");
-    app.setApplicationVersion("0.3.3");
+    app.setApplicationVersion("0.3.4");
 #ifdef Q_OS_WIN
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     listenfree::WindowsMediaSession::registerApplicationIdentity("ListenFree.Desktop", "ListenFree");

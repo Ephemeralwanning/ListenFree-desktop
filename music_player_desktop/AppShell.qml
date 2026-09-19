@@ -450,14 +450,27 @@ Item {
     }
 
     function removeQueue(index) {
+        const sidebarPosition = sidebarQueue ? sidebarQueue.contentY : 0
         if (useBackendModels && playerController) {
             playerController.removeFromQueue(index)
+            Qt.callLater(function() {
+                if (!sidebarQueue) return
+                sidebarQueue.forceLayout()
+                sidebarQueue.contentY = Math.max(0, Math.min(sidebarPosition,
+                                                            sidebarQueue.contentHeight - sidebarQueue.height))
+            })
             return
         }
         if (index < 0 || index >= queueSongs.length) return
         const next = queueSongs.slice()
         next.splice(index, 1)
         queueSongs = next
+        Qt.callLater(function() {
+            if (!sidebarQueue) return
+            sidebarQueue.forceLayout()
+            sidebarQueue.contentY = Math.max(0, Math.min(sidebarPosition,
+                                                        sidebarQueue.contentHeight - sidebarQueue.height))
+        })
     }
 
     function openQueue(fromNowPlaying) {

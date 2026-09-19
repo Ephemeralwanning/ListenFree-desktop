@@ -27,6 +27,15 @@ void TrackListModel::setRows(QVariantList rows) {
     emit countChanged();
 }
 
+bool TrackListModel::removeRow(int row) {
+    if (!rowStorage_ || row < 0 || row >= rows_.size()) return false;
+    beginRemoveRows({}, row, row);
+    rows_.removeAt(row);
+    endRemoveRows();
+    emit countChanged();
+    return true;
+}
+
 QVariantMap TrackListModel::get(int row) const {
     if (row < 0 || row >= rowCount()) return {};
     QVariantMap result;

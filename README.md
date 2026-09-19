@@ -34,10 +34,10 @@ Windows 10/11 x64 原生音乐播放器，使用 Qt Quick、Qmmp、QuickJS-ng �
 安装 Inno Setup 6 和 7-Zip 后生成干净的安装版与便携 ZIP：
 
 ```powershell
-./scripts/windows/package-release.ps1 -Version 0.3.3
+./scripts/windows/package-release.ps1 -Version 0.3.4
 ```
 
-只生成安装包时追加 `-InstallerOnly`，无需 7-Zip。只生成便携 ZIP 时追加 `-PortableOnly`，无需安装 Inno Setup。0.3.3 的本地整合内容见 [更新说明](packaging/release-notes-0.3.3.txt)。
+只生成安装包时追加 `-InstallerOnly`，无需 7-Zip。只生成便携 ZIP 时追加 `-PortableOnly`，无需安装 Inno Setup。0.3.4 的本地整合内容见 [更新说明](packaging/release-notes-0.3.4.txt)。
 
 使用已经验收的运行库目录可传入 `-RuntimeDirectory <目录>`；追加 `-SkipChecksums` 可只生成安装包和便携 ZIP，不生成校验文件。
 
@@ -58,7 +58,7 @@ src/、music_player_desktop/、ui/ 是应用与资源；tests/ 和 tools/ 保留
 
 ## 软件更新与发布
 
-“设置 → 关于 → 检查软件更新”使用 [WinSparkle 0.9.4](https://winsparkle.org/guides/getting-started/) 提示新版、展示更新说明、下载并验证签名，用户确认后启动 Inno Setup。只在手动检查时加载组件，关闭定期检查。安装版原目录升级；便携版原目录覆盖程序文件，保留 portable.mode 与 data，且不创建卸载项或快捷方式。0.3.2 及更早版本需先手动升级一次。
+“设置 → 关于 → 检查软件更新”使用 [WinSparkle 0.9.4](https://winsparkle.org/guides/getting-started/) 提示新版、展示更新说明、下载并验证签名，用户确认后启动 Inno Setup。只在手动检查时加载组件，关闭定期检查。安装版原目录升级；便携版原目录覆盖程序文件，保留 portable.mode 与 data，且不创建卸载项或快捷方式。0.3.2 及更早版本需先手动升级一次；0.3.3 起支持应用内更新。
 
 CMake 从官方 Release 获取已固定 SHA-256 的 WinSparkle x64 包，也可设置 `LISTENFREE_WINSPARKLE_ROOT` 指向解压目录；运行时只分发 DLL 和许可。更新信息地址固定为本仓库 `releases/latest/download/appcast.xml`，文件中指向明确版本的 Setup.exe。比较后选择 WinSparkle 的原因是它已经提供 EdDSA 验签和原生更新界面，可直接配合现有安装器；QSimpleUpdater 仍需另接签名校验，Velopack 则需要迁移安装布局。
 

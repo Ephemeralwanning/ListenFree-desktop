@@ -25,6 +25,7 @@ public:
     // Share the portable catalog/queue maps instead of duplicating every string
     // into a second domain::Track collection solely for QML presentation.
     void setRows(QVariantList rows);
+    bool removeRow(int row);
     int rowCount(const QModelIndex& parent = {}) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;

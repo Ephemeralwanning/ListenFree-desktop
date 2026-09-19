@@ -1420,14 +1420,15 @@ void BackendTests::sourceHostProvidesAsyncRequestBridge() {
     bool formRequestValid = false;
     bool multipartRequestValid = false;
     bool proxyRequestObserved = false;
+    bool jsonRequestValid = false;
     connect(&server, &QTcpServer::newConnection, &server,
             [&server, &hangingRequest, &formRequestValid, &multipartRequestValid,
-             &proxyRequestObserved] {
+             &proxyRequestObserved, &jsonRequestValid] {
         while (server.hasPendingConnections()) {
             QTcpSocket* socket = server.nextPendingConnection();
             connect(socket, &QTcpSocket::readyRead, socket,
                     [socket, &hangingRequest, &formRequestValid, &multipartRequestValid,
-                     &proxyRequestObserved] {
+                     &proxyRequestObserved, &jsonRequestValid] {
                 QByteArray request = socket->property("requestData").toByteArray();
                 request += socket->readAll();
                 socket->setProperty("requestData", request);
@@ -1447,6 +1448,12 @@ void BackendTests::sourceHostProvidesAsyncRequestBridge() {
                     return;
                 }
                 const auto bodyBytes = request.mid(headerEnd + 4, contentLength);
+                if (request.contains("/json HTTP/1.1")) {
+                    const auto object = QJsonDocument::fromJson(bodyBytes).object();
+                    jsonRequestValid = object.value("rid").toString() == "song-3"
+                        && object.value("quality").toString() == "320k"
+                        && object.value("title").toString() == QStringLiteral("测试歌曲");
+                }
                 if (request.contains("/form HTTP/1.1")) {
                     formRequestValid = headers.contains("content-type: application/x-www-form-urlencoded") &&
                                        bodyBytes.contains("alpha=one%20two") &&
@@ -1488,6 +1495,11 @@ on(EVENT_NAMES.request, ({ source, action, info }) => {
             let endpoint = ''
             let options = { method: 'get', timeout: 2000 }
             if (info.musicInfo.id === 'cancel') endpoint = '/hang'
+            if (info.musicInfo.id === 'song-3') {
+                endpoint = '/json'
+                options = { method: 'post', headers: { 'Content-Type': 'application/json' },
+                            body: { rid: 'song-3', quality: '320k', title: '测试歌曲' }, timeout: 2000 }
+            }
             if (info.musicInfo.id === 'form') {
                 endpoint = '/form'
                 options = { method: 'post', form: { alpha: 'one two', beta: '三' }, timeout: 2000 }
@@ -1563,6 +1575,7 @@ send(EVENT_NAMES.inited, {
                      .value<listenfree::sourcehost::SourceHostClient::RequestTerminal>(),
                  listenfree::sourcehost::SourceHostClient::RequestTerminal::Succeeded);
     }
+    QVERIFY(jsonRequestValid);
     QVERIFY(formRequestValid);
     QVERIFY(multipartRequestValid);
     QVERIFY(proxyRequestObserved);

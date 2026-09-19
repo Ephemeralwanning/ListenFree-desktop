@@ -161,6 +161,21 @@ PortableSession::PortableSession(infrastructure::database::Database& database, c
         QTimer::singleShot(0, this, [this, generation] {
             if (generation != generation_) return;
             if(live()){fail(QStringLiteral("电台连接已中断"));return;}
+            const auto track = currentTrack();
+            const auto expected = player_.duration().count();
+            const auto actual = player_.position().count();
+            const bool networkTrack = !track.value("rid").toString().isEmpty() ||
+                                       !track.value("remoteUrl").toString().isEmpty();
+            if (networkTrack && expected > 0 && actual + 1500 < expected &&
+                prematureNetworkRetries_ < 2) {
+                ++prematureNetworkRetries_;
+                const auto retryGeneration = generation_;
+                QTimer::singleShot(300, this, [this, retryGeneration] {
+                    if (retryGeneration == generation_) beginCurrent();
+                });
+                return;
+            }
+            prematureNetworkRetries_ = 0;
             if (mode_ == "stopAfterCurrent") { stop(); return; }
             if (mode_ == "singleLoop") beginCurrent(); else if(navigation_.nextTrack()) next(); else stop();
         });
@@ -585,7 +600,14 @@ bool PortableSession::removeFromQueue(int index) {
     if (current) {mediaReady_=false;invalidate();}
     entries_.remove(track); navigation_.removeTrack(track);
     if (current && !navigation_.isEmpty()) navigation_.setCurrent(std::min(index, navigation_.trackCount() - 1));
-    syncQueue(); emit currentTrackChanged();
+    QVariantList nextView;
+    for (auto* remaining : navigation_.tracks()) nextView.append(entries_.value(remaining));
+    const bool modelRemoved = queueView_.size() == nextView.size() + 1 && queueModel_.removeRow(index);
+    queueView_ = std::move(nextView);
+    if (!modelRemoved) queueModel_.setRows(queueView_);
+    emit queueContentsChanged();
+    queueModel_.setCurrentIndex(navigation_.currentIndex());
+    saveQueue(); emit queueChanged(); emit currentTrackChanged();
     if (current && resume && !navigation_.isEmpty()) beginCurrent();
     return true;
 }

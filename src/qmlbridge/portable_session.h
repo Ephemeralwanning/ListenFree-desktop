@@ -346,6 +346,7 @@ private:
     QString duplicateResumeEntry_,duplicateResumeState_;
     qint64 duplicateResumePosition_{0};
     int consecutiveErrors_{0};
+    int prematureNetworkRetries_{0};
     bool batching_{false};
     bool loading_{false}, mediaReady_{false}, ready_{false}, searchBusy_{false}, stopped_{false}, reloadAgain_{false};
     bool libraryReloadActive_{false};

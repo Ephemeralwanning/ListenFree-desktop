@@ -1113,9 +1113,14 @@ private:
         if (options.value(QStringLiteral("body")).isString()) {
             body = options.value(QStringLiteral("body")).toString().toUtf8();
         } else if (options.value(QStringLiteral("body")).isObject()) {
-            const auto encoded = options.value(QStringLiteral("body")).toObject()
-                                     .value(QStringLiteral("__lf_base64")).toString();
-            body = QByteArray::fromBase64(encoded.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+            const auto bodyObject = options.value(QStringLiteral("body")).toObject();
+            const auto encoded = bodyObject.value(QStringLiteral("__lf_base64")).toString();
+            if (!encoded.isEmpty()) {
+                body = QByteArray::fromBase64(encoded.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+            } else {
+                // Legacy LX sources commonly pass a plain object for JSON bodies.
+                body = QJsonDocument(bodyObject).toJson(QJsonDocument::Compact);
+            }
         } else if (options.value(QStringLiteral("form")).isObject()) {
             const QJsonObject form = options.value(QStringLiteral("form")).toObject();
             QUrlQuery query;
